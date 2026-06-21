@@ -880,12 +880,11 @@ def compute_access(graph: nx.Graph, nodes: dict[int, tuple[float, float]],
             lon, lat = feature["geometry"]["coordinates"]
             node_id = snap_to_node(grid, cell, nodes, lat, lon)
             d = dist.get(node_id)
-            if d is None:  # POI on a disconnected fragment - fall back to crow-flies
-                d = haversine_m(center[0], center[1], lat, lon)
+            if d is None:
+                continue  # not reachable on foot within the time budget
+            count += 1
             if nearest_m is None or d < nearest_m:
                 nearest_m = d
-            if d <= budget:
-                count += 1
         total_reachable += count
         categories.append({
             "key": key,
@@ -893,7 +892,8 @@ def compute_access(graph: nx.Graph, nodes: dict[int, tuple[float, float]],
             "count": count,
             "present": count > 0,
             "nearest_m": round(nearest_m) if nearest_m is not None else None,
-            "nearest_min": round(nearest_m / speed / 60, 1) if nearest_m else None,
+            "nearest_min": (round(nearest_m / speed / 60, 1)
+                            if nearest_m is not None else None),
         })
 
     present_cats = [c for c in categories if c["present"]]
@@ -902,10 +902,11 @@ def compute_access(graph: nx.Graph, nodes: dict[int, tuple[float, float]],
     # Three transparent, explainable factors, capped at 99 (never a suspicious 100).
     coverage = present / total_cats                      # how many of the categories
     abundance = min(1.0, total_reachable / 80.0)         # how many places overall
-    proximity = (                                        # how close, on average
-        sum(max(0.0, 1 - (c["nearest_min"] or minutes) / minutes) for c in present_cats)
-        / present
-    ) if present else 0.0
+    # Proximity averaged over ALL categories (absent count as 0) so the score is
+    # monotonic: adding an amenity can only raise it, closing streets only lower it.
+    proximity = sum(
+        max(0.0, 1 - c["nearest_min"] / minutes) for c in present_cats
+    ) / total_cats
     score = int(round(100 * (0.5 * coverage + 0.25 * abundance + 0.25 * proximity)))
     score = max(0, min(99, score))
     factors = {
