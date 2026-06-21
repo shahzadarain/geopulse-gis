@@ -53,12 +53,14 @@ SPEED_MPS = {"drive": 11.1, "bike": 4.2, "walk": 1.4, "all": 1.4}
 ACCESS_MINUTES = 15  # the "15-minute neighbourhood" walk window
 
 # Plain-language labels for the everyday-access scorecard.
+# Canonical category labels - identical to POI_LABELS so the score card, the
+# "what is nearby" toggles, and the map legend all match exactly.
 ACCESS_LABELS = {
-    "food_retail": "Groceries & dining",
+    "food_retail": "Food & retail",
     "healthcare": "Healthcare",
-    "education": "Schools & learning",
+    "education": "Education",
     "transit": "Transit & fuel",
-    "civic": "Civic & banking",
+    "civic": "Civic & finance",
     "leisure": "Parks & leisure",
 }
 
@@ -1745,8 +1747,15 @@ PAGE = r"""<!doctype html>
     details.method>summary::-webkit-details-marker{display:none}
     details.method>summary::after{content:" +"}
     details.method[open]>summary::after{content:" -"}
-    .whatif h2{display:flex;align-items:center;gap:8px}
-    .whatif h2::before{content:"";width:9px;height:9px;border-radius:50%;background:#7c3aed}
+    details.whatif{padding:0}
+    details.whatif>summary{display:flex;align-items:center;gap:8px;padding:14px;cursor:pointer;
+      font-size:15px;font-weight:700;color:#101828;list-style:none}
+    details.whatif>summary::-webkit-details-marker{display:none}
+    details.whatif>summary::before{content:"";width:9px;height:9px;border-radius:50%;background:#7c3aed;flex:0 0 auto}
+    details.whatif>summary::after{content:"+";margin-left:auto;color:var(--muted);font-weight:700}
+    details.whatif[open]>summary::after{content:"\2013"}
+    details.whatif>*:not(summary){margin-left:14px;margin-right:14px}
+    details.whatif>*:last-child{margin-bottom:14px}
     .ask h2{display:flex;align-items:center;gap:8px}
     .ask h2::before{content:"";width:9px;height:9px;border-radius:50%;background:#2563eb}
     .ask-answer{margin-top:11px;font-size:13px;line-height:1.55;color:#344054}
@@ -1765,12 +1774,13 @@ PAGE = r"""<!doctype html>
     .wi-row{display:flex;justify-content:space-between;gap:8px;font-size:12px;margin-top:5px}
     main{position:relative;min-width:0;height:100vh}
     #map{position:absolute;inset:0;background:#e8eef6}
-    .map-card{position:absolute;z-index:500;right:18px;top:18px;width:min(420px,calc(100% - 36px));
-      padding:12px 14px;background:var(--panel);border:1px solid var(--line);border-radius:8px;
-      box-shadow:0 12px 30px rgba(16,24,40,.14)}
-    .map-card strong{display:block;font-size:16px}
-    .map-card span{display:block;margin-top:4px;color:var(--muted);font-size:13px;line-height:1.35}
-    .status{position:absolute;z-index:700;left:50%;bottom:24px;max-width:min(620px,calc(100% - 48px));
+    /* top-right info card (legend lives in its own panel now) */
+    .map-card{position:absolute;z-index:500;right:14px;top:14px;width:min(320px,calc(100% - 28px));
+      padding:11px 13px;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+      box-shadow:0 10px 28px rgba(16,24,40,.16)}
+    .map-card strong{display:block;font-size:15px}
+    .map-card span{display:block;margin-top:3px;color:var(--muted);font-size:12.5px;line-height:1.35}
+    .status{position:absolute;z-index:700;left:50%;bottom:18px;max-width:min(620px,calc(100% - 48px));
       padding:10px 12px;color:#344054;background:#fff;border:1px solid var(--line);border-radius:8px;
       box-shadow:0 10px 25px rgba(16,24,40,.12);transform:translateX(-50%);font-size:13px}
     .status.error{color:#7a271a;background:#fff4ed;border-color:#f9dbaf}
@@ -1778,23 +1788,51 @@ PAGE = r"""<!doctype html>
       vertical-align:-2px;border:2px solid #cfd6e4;border-top-color:var(--accent);
       border-radius:50%;animation:spin .8s linear infinite}
     @keyframes spin{to{transform:rotate(360deg)}}
-    .tools{position:absolute;z-index:600;left:18px;top:18px;display:flex;gap:8px;flex-wrap:wrap}
-    .tools button{width:auto;min-height:40px;padding:0 12px;background:#fff;color:#344054;
-      border:1px solid var(--line);border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;
-      box-shadow:0 6px 18px rgba(16,24,40,.1)}
-    .tools button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
-    .tools select{width:auto;min-height:40px;padding:0 8px;background:#fff;color:#344054;
-      border:1px solid var(--line);border-radius:8px;font-size:13px;font-weight:700;
-      box-shadow:0 6px 18px rgba(16,24,40,.1)}
-    .legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font-size:12px;color:#475467}
-    .legend i{display:inline-block;width:16px;height:6px;margin-right:6px;border-radius:99px;vertical-align:2px}
+    /* top-left grouped toolbar (single container, never under another panel) */
+    .tools{position:absolute;z-index:600;left:14px;top:14px;display:flex;flex-direction:column;gap:6px;
+      padding:7px;background:var(--panel);border:1px solid var(--line);border-radius:12px;
+      box-shadow:0 10px 28px rgba(16,24,40,.16);max-width:calc(100% - 28px)}
+    .tools-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+    .tools .tool{width:auto;min-height:40px;padding:0 13px;background:#fff;color:#344054;
+      border:1px solid var(--line);border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;transition:.12s}
+    .tools .tool:hover{border-color:var(--accent);color:var(--accent)}
+    .tools .tool.on{background:var(--accent);color:#fff;border-color:var(--accent);
+      box-shadow:0 0 0 3px rgba(15,118,110,.2)}
+    .tools .tool.danger:hover{border-color:#f04438;color:#f04438}
+    .tools .tool:focus-visible{outline:3px solid rgba(15,118,110,.45);outline-offset:1px}
+    .reach-group{display:inline-flex;align-items:stretch;border:1px solid var(--line);
+      border-radius:8px;overflow:hidden}
+    .reach-group .tool{border:0;border-radius:0;min-height:40px}
+    .reach-group .tool.on{box-shadow:none}
+    .reach-group select{width:auto;min-height:40px;padding:0 6px;border:0;border-left:1px solid var(--line);
+      background:#f1f5f9;color:#344054;font-size:12px;font-weight:700;outline:none}
+    .tools-sep{width:1px;align-self:stretch;background:var(--line);margin:3px 1px}
+    .tools-hint{font-size:11.5px;color:var(--muted);padding:0 4px 1px}
+    .tools-hint.active{color:var(--accent);font-weight:700}
+    /* bottom-left collapsible legend */
+    .legend-panel{position:absolute;z-index:550;left:14px;bottom:18px;padding:8px 11px;
+      background:var(--panel);border:1px solid var(--line);border-radius:10px;
+      box-shadow:0 10px 28px rgba(16,24,40,.16);max-width:min(330px,calc(100% - 28px))}
+    .legend-toggle{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;
+      background:none;border:0;cursor:pointer;font-size:12px;font-weight:800;color:#344054;padding:0;min-height:0}
+    .legend-toggle .caret{transition:transform .15s}
+    .legend-toggle[aria-expanded="false"] .caret{transform:rotate(-90deg)}
+    .legend{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;margin-top:8px;font-size:12px;color:#475467}
+    .legend.hidden{display:none}
+    .legend span{display:flex;align-items:center;gap:7px;white-space:nowrap}
+    .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;flex:0 0 auto}
+    .legend b{margin-left:auto;color:#101828;font-weight:700}
     @media (max-width:900px){
       body{overflow:auto}
       .shell{display:block;height:auto}
       aside{height:auto;border-right:0;border-bottom:1px solid var(--line)}
-      main{height:72vh;min-height:520px}
-      .map-card{left:12px;right:12px;top:12px;width:auto}
-      .tools{top:auto;bottom:70px;left:12px}
+      main{height:66vh;min-height:440px}
+      .map-card{left:10px;right:10px;top:10px;width:auto}
+      .tools{left:10px;right:10px;top:auto;bottom:10px;max-width:none}
+      .tools-row{flex-wrap:nowrap;overflow-x:auto;justify-content:flex-start;-webkit-overflow-scrolling:touch}
+      .tools .tool{flex:0 0 auto}
+      .status{bottom:76px}
+      .legend-panel{display:none}
     }
   </style>
 </head>
@@ -1884,16 +1922,16 @@ PAGE = r"""<!doctype html>
         <div id="askAnswer" class="ask-answer"></div>
       </section>
 
-      <section class="card whatif" id="whatifCard">
-        <h2>What-If Studio</h2>
+      <details class="card whatif" id="whatifCard">
+        <summary>What-If Studio</summary>
         <p class="subtitle">Propose a change and see the walkability impact, recomputed on the live street graph.</p>
         <div class="grid">
           <select id="wiCategory" aria-label="Amenity type">
-            <option value="food_retail">Groceries &amp; dining</option>
+            <option value="food_retail">Food &amp; retail</option>
             <option value="healthcare">Healthcare</option>
-            <option value="education">Schools &amp; learning</option>
+            <option value="education">Education</option>
             <option value="transit">Transit &amp; fuel</option>
-            <option value="civic">Civic &amp; banking</option>
+            <option value="civic">Civic &amp; finance</option>
             <option value="leisure">Parks &amp; leisure</option>
           </select>
           <button class="ghost" type="button" id="wiAddBtn">Add a place</button>
@@ -1905,7 +1943,7 @@ PAGE = r"""<!doctype html>
           <button class="ghost" type="button" id="wiReset" disabled>Reset</button>
         </div>
         <div id="wiResult"></div>
-      </section>
+      </details>
 
       <section class="card">
         <h2>What is nearby</h2>
@@ -1952,26 +1990,41 @@ PAGE = r"""<!doctype html>
 
     <main>
       <div id="map"></div>
-      <div class="tools">
-        <button type="button" id="routeBtn" title="Shortest path between two points">Route</button>
-        <button type="button" id="isoBtn" title="Travel reach from a point">Reach</button>
-        <select id="isoMin" title="Reach time" aria-label="Reach minutes">
-          <option value="5">5 min</option>
-          <option value="10" selected>10 min</option>
-          <option value="15">15 min</option>
-          <option value="20">20 min</option>
-          <option value="30">30 min</option>
-        </select>
-        <button type="button" id="centralityBtn" title="Highest-traffic corridors">Corridors</button>
-        <button type="button" id="measureBtn" title="Measure distance and area">Measure</button>
-        <button type="button" id="clearToolsBtn" title="Clear overlays">Clear</button>
+
+      <div class="tools" role="toolbar" aria-label="Map tools">
+        <div class="tools-row">
+          <button type="button" id="routeBtn" class="tool" aria-pressed="false" aria-label="Route: shortest path between two points">Route</button>
+          <span class="reach-group">
+            <button type="button" id="isoBtn" class="tool" aria-pressed="false" aria-label="Reach: travel reach from a point">Reach</button>
+            <select id="isoMin" aria-label="Reach time in minutes">
+              <option value="5">5 min</option>
+              <option value="10" selected>10 min</option>
+              <option value="15">15 min</option>
+              <option value="20">20 min</option>
+              <option value="30">30 min</option>
+            </select>
+          </span>
+          <button type="button" id="centralityBtn" class="tool" aria-pressed="false" aria-label="Corridors: highest-traffic streets">Corridors</button>
+          <button type="button" id="measureBtn" class="tool" aria-pressed="false" aria-label="Measure distance and area">Measure</button>
+          <span class="tools-sep" aria-hidden="true"></span>
+          <button type="button" id="clearToolsBtn" class="tool danger" aria-label="Clear all overlays">Clear</button>
+        </div>
+        <div class="tools-hint" id="toolsHint">Pick a tool, then click the map.</div>
       </div>
+
       <div class="map-card">
         <strong id="mapTitle">Ready for analysis</strong>
         <span id="mapSubtitle">A fresh street graph is built from OpenStreetMap for the selected location.</span>
+      </div>
+
+      <div class="legend-panel" id="legendPanel">
+        <button class="legend-toggle" id="legendToggle" aria-expanded="true" aria-controls="legend">
+          <span>Legend</span><span class="caret" aria-hidden="true">&#9662;</span>
+        </button>
         <div class="legend" id="legend"></div>
       </div>
-      <div id="status" class="status" role="status" aria-live="polite">Loading San Francisco as the opening example...</div>
+
+      <div id="status" class="status" role="status" aria-live="polite">Loading San Francisco as the opening example&hellip;</div>
     </main>
   </div>
 
@@ -1985,8 +2038,10 @@ PAGE = r"""<!doctype html>
       secondary:"#2563eb",tertiary:"#0f766e",residential:"#475467",service:"#98a2b3",
       living_street:"#7c3aed",footway:"#7c3aed",cycleway:"#0891b2",path:"#7c3aed",
       track:"#a16207",pedestrian:"#9333ea",steps:"#9333ea",unclassified:"#667085",road:"#667085"};
-    const POI_COLORS = {healthcare:"#e11d48",education:"#7c3aed",food_retail:"#d97706",
-      transit:"#2563eb",civic:"#0f766e",leisure:"#16a34a"};
+    // Colour-blind-safe (Paul Tol). Distinct hues; Roads is grey, never an amber.
+    const POI_COLORS = {healthcare:"#CC3311",education:"#EE3377",food_retail:"#EE7733",
+      transit:"#0077BB",civic:"#009988",leisure:"#228833"};
+    const ROAD_LEGEND_COLOR = "#555555";
 
     const map = L.map("map",{preferCanvas:true,zoomControl:true}).setView([37.7749,-122.4194],13);
     const light = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
@@ -2092,10 +2147,12 @@ PAGE = r"""<!doctype html>
 
       $("mapTitle").textContent=s.place;
       $("mapSubtitle").textContent=`${s.network_type.toUpperCase()} network | ${nFmt(s.edges)} segments | ${kmFmt(s.total_km)} | ${s.source}`;
+      const cats=lastData.pois?lastData.pois.categories:{};
       $("legend").innerHTML=
-        '<span><i style="background:#d97706"></i>Roads</span>'+
-        Object.entries(POI_COLORS).map(([k,c])=>
-          `<span><i style="background:${c}"></i>${(lastData.pois.categories[k]||{}).label||k}</span>`).join("");
+        `<span><i style="background:${ROAD_LEGEND_COLOR}"></i>Roads</span>`+
+        Object.entries(POI_COLORS).map(([k,c])=>{const info=cats[k]||{};
+          const cnt=info.count?`<b>${nFmt(info.count)}</b>`:"";
+          return `<span><i style="background:${c}"></i>${info.label||k}${cnt}</span>`;}).join("");
     }
 
     function renderPois(pois){
@@ -2233,14 +2290,20 @@ PAGE = r"""<!doctype html>
       measureMarkers=[];routeMarkers=[];measurePts=[];routePts=[];
       if($("centralityBtn"))$("centralityBtn").classList.remove("on");
     }
+    const TOOL_HINTS={measure:"Measure: click points on the map.",
+      route:"Route: click an origin, then a destination.",
+      iso:"Reach: click a point to map travel reach."};
+    function setToolHint(text){const h=$("toolsHint");if(!h)return;
+      if(text){h.textContent=text;h.classList.add("active");}
+      else{h.textContent="Pick a tool, then click the map.";h.classList.remove("active");}}
     function setMode(name){
       if(wiMode)wiSetMode(null);   // tools and What-If are mutually exclusive
       activeMode=activeMode===name?null:name;
-      Object.entries(modeBtns).forEach(([k,b])=>b&&b.classList.toggle("on",k===activeMode));
+      Object.entries(modeBtns).forEach(([k,b])=>{if(b){const on=k===activeMode;
+        b.classList.toggle("on",on);b.setAttribute("aria-pressed",String(on));}});
       map.getContainer().style.cursor=activeMode?"crosshair":"";
-      if(activeMode==="measure")setStatus("Measure: click points on the map.","");
-      else if(activeMode==="route")setStatus("Route: click an origin, then a destination.","");
-      else if(activeMode==="iso")setStatus("Reach: click a point to map travel reach.","");
+      setToolHint(activeMode?TOOL_HINTS[activeMode]:"");
+      if(activeMode)setStatus(TOOL_HINTS[activeMode],"");
       else if(lastData)setStatus(`Analysis ready: ${lastData.stats.place}`,"");
     }
     map.on("click",(e)=>{
@@ -2323,9 +2386,12 @@ PAGE = r"""<!doctype html>
     $("measureBtn").addEventListener("click",()=>setMode("measure"));
     $("centralityBtn").addEventListener("click",toggleCentrality);
     $("clearToolsBtn").addEventListener("click",()=>{clearTools();activeMode=null;
-      Object.values(modeBtns).forEach(b=>b&&b.classList.remove("on"));
-      map.getContainer().style.cursor="";
+      Object.values(modeBtns).forEach(b=>{if(b){b.classList.remove("on");b.setAttribute("aria-pressed","false");}});
+      map.getContainer().style.cursor="";setToolHint("");
       setStatus(lastData?`Analysis ready: ${lastData.stats.place}`:"Cleared.","");});
+    $("legendToggle").addEventListener("click",()=>{
+      const hidden=$("legend").classList.toggle("hidden");
+      $("legendToggle").setAttribute("aria-expanded",String(!hidden));});
 
     /* ----- export ----- */
     function download(name,text,type){
