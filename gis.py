@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from math import asin, atan2, cos, degrees, log, pi, radians, sin, sqrt
@@ -62,6 +64,11 @@ ACCESS_LABELS = {
 
 # "Ask the City" - the LLM is grounded strictly on the computed fact sheet.
 ASK_MODEL = os.environ.get("GIS_ASK_MODEL", "claude-opus-4-8")
+# Abuse controls for the (paid) LLM endpoint. Per-warm-instance, so a spend cap
+# on the Anthropic key remains the airtight backstop; these cut casual abuse.
+ASK_RATE_LIMIT = int(os.environ.get("GIS_ASK_RATE_LIMIT", "8"))   # requests
+ASK_RATE_WINDOW = int(os.environ.get("GIS_ASK_RATE_WINDOW", "60"))  # ...per seconds
+ASK_CACHE_MAX = 256
 ASK_SYSTEM = (
     "You are a city analyst for GeoPulse GIS. Answer the user's question about a "
     "place using ONLY the JSON facts in the user message. Those facts were computed "
@@ -1427,12 +1434,62 @@ def whatif() -> Any:
         return jsonify({"error": friendly_error(exc)}), 502
 
 
+# Per-instance abuse controls for /api/ask (warm-Lambda scoped; pair with an
+# Anthropic spend cap for an airtight ceiling).
+_ask_rate: dict[str, list[float]] = {}
+_ask_cache: "OrderedDict[tuple, str]" = OrderedDict()
+
+
+def client_ip() -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def ask_rate_limited(ip: str) -> bool:
+    now = time.time()
+    record = _ask_rate.get(ip)
+    if record is None or now - record[0] >= ASK_RATE_WINDOW:
+        _ask_rate[ip] = [now, 1]
+        if len(_ask_rate) > 5000:  # opportunistic prune of stale windows
+            cutoff = now - ASK_RATE_WINDOW
+            for stale in [k for k, v in _ask_rate.items() if v[0] < cutoff]:
+                _ask_rate.pop(stale, None)
+        return False
+    if record[1] >= ASK_RATE_LIMIT:
+        return True
+    record[1] += 1
+    return False
+
+
+def ask_cache_get(key: tuple) -> str | None:
+    value = _ask_cache.get(key)
+    if value is not None:
+        _ask_cache.move_to_end(key)
+    return value
+
+
+def ask_cache_put(key: tuple, value: str) -> None:
+    _ask_cache[key] = value
+    _ask_cache.move_to_end(key)
+    while len(_ask_cache) > ASK_CACHE_MAX:
+        _ask_cache.popitem(last=False)
+
+
 @gis.post("/api/ask")
 def ask() -> Any:
     body = request.get_json(silent=True) or {}
     question = (body.get("question") or "").strip()[:500]
     if not question:
         return jsonify({"error": "Ask a question first."}), 400
+
+    if ask_rate_limited(client_ip()):
+        resp = jsonify({"error": "Too many questions in a short time. "
+                                 "Please wait a moment and try again."})
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(ASK_RATE_WINDOW)
+        return resp
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -1456,6 +1513,18 @@ def ask() -> Any:
     except (ValueError, TypeError):
         radius_m = 1500
 
+    # Canonical cache key. Resolve coords first so a repeat question is answered
+    # without re-fetching data or calling the model.
+    try:
+        lat, lon, label = geocode_place(place)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": friendly_error(exc)}), 502
+    q_norm = " ".join(question.lower().split())
+    cache_key = (round(lat, 4), round(lon, 4), network_type, radius_m, q_norm)
+    cached = ask_cache_get(cache_key)
+    if cached is not None:
+        return jsonify({"answer": cached, "place": label, "cached": True})
+
     try:
         result = analyze(place, network_type, radius_m)
     except Exception as exc:  # noqa: BLE001
@@ -1476,8 +1545,10 @@ def ask() -> Any:
         answer = "".join(
             b.text for b in message.content if getattr(b, "type", None) == "text"
         ).strip()
+        if answer:
+            ask_cache_put(cache_key, answer)
         return jsonify({"answer": answer or "No answer was produced.",
-                        "place": result["stats"]["place"]})
+                        "place": result["stats"]["place"], "cached": False})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"Ask the City failed: {exc}"}), 502
 
