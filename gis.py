@@ -38,8 +38,10 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 NETWORK_TYPES = {"drive", "walk", "bike", "all"}
 MAX_RADIUS_METERS = 10_000
 MIN_RADIUS_METERS = 400
-DEFAULT_PLACE = "Amman, Jordan"
-HTTP_TIMEOUT = 90
+ALL_MODE_MAX_RADIUS = 6_000  # "all paths" is heavy; cap it tighter
+MAX_CENTRALITY_NODES = 9_000  # refuse betweenness above this to avoid timeouts
+DEFAULT_PLACE = "San Francisco, California"
+HTTP_TIMEOUT = 25  # kept under the serverless function wall-clock limit
 MAX_POIS = 1500
 USER_AGENT = "GeoPulseGIS/2.0 (https://shahzadasghar.org/gis)"
 ORIENTATION_BINS = 36  # 10-degree bins for the street-orientation rose
@@ -303,9 +305,17 @@ def overpass_query(query: str) -> dict[str, Any]:
     )
 
 
+def short_place(display_name: str) -> str:
+    """Trim a long Nominatim display name to 'City, Country'."""
+    parts = [p.strip() for p in display_name.split(",") if p.strip()]
+    if len(parts) <= 2:
+        return display_name.strip()
+    return f"{parts[0]}, {parts[-1]}"
+
+
 @lru_cache(maxsize=256)
 def geocode_place(place: str) -> tuple[float, float, str]:
-    """Resolve a place name (or 'lat,lon') to (lat, lon, display_name)."""
+    """Resolve a place name (or 'lat,lon') to (lat, lon, short_label)."""
     coords = parse_latlon(place)
     if coords:
         lat, lon = coords
@@ -316,7 +326,12 @@ def geocode_place(place: str) -> tuple[float, float, str]:
     try:
         response = _session.get(
             f"{NOMINATIM_URL}/search",
-            params={"q": place, "format": "jsonv2", "limit": 1},
+            params={
+                "q": place,
+                "format": "jsonv2",
+                "limit": 1,
+                "accept-language": "en",  # keep labels in English
+            },
             timeout=HTTP_TIMEOUT,
         )
         response.raise_for_status()
@@ -326,13 +341,13 @@ def geocode_place(place: str) -> tuple[float, float, str]:
             return (
                 float(top["lat"]),
                 float(top["lon"]),
-                top.get("display_name", place),
+                short_place(top.get("display_name", place)),
             )
     except Exception:  # noqa: BLE001 - fall back to the offline table
         pass
 
     if fallback:
-        return fallback[0], fallback[1], place
+        return fallback[0], fallback[1], place.strip()
     raise RuntimeError(
         f"Could not find '{place}'. Try a more specific name or 'lat, lon'."
     )
@@ -772,7 +787,11 @@ def compute_centrality(graph: nx.Graph, nodes: dict[int, tuple[float, float]],
     n = graph.number_of_nodes()
     if n < 2:
         return {"type": "FeatureCollection", "features": []}
-    k = None if n <= 250 else min(200, n - 1)
+    if n > MAX_CENTRALITY_NODES:
+        raise RuntimeError(
+            "This area is too large for corridor analysis. Reduce the radius and try again."
+        )
+    k = None if n <= 250 else min(160, n - 1)
     scores = nx.edge_betweenness_centrality(
         graph, k=k, weight="length", seed=42
     )
@@ -877,11 +896,25 @@ def compute_access(graph: nx.Graph, nodes: dict[int, tuple[float, float]],
             "nearest_min": round(nearest_m / speed / 60, 1) if nearest_m else None,
         })
 
-    present = sum(1 for c in categories if c["present"])
+    present_cats = [c for c in categories if c["present"]]
+    present = len(present_cats)
     total_cats = len(categories) or 1
-    coverage = present / total_cats
-    density = min(1.0, total_reachable / 30.0)
-    score = int(round(100 * (0.7 * coverage + 0.3 * density)))
+    # Three transparent, explainable factors, capped at 99 (never a suspicious 100).
+    coverage = present / total_cats                      # how many of the categories
+    abundance = min(1.0, total_reachable / 80.0)         # how many places overall
+    proximity = (                                        # how close, on average
+        sum(max(0.0, 1 - (c["nearest_min"] or minutes) / minutes) for c in present_cats)
+        / present
+    ) if present else 0.0
+    score = int(round(100 * (0.5 * coverage + 0.25 * abundance + 0.25 * proximity)))
+    score = max(0, min(99, score))
+    factors = {
+        "coverage": round(coverage, 2),
+        "abundance": round(abundance, 2),
+        "proximity": round(proximity, 2),
+    }
+    method = ("Score blends category coverage (50%), number of places (25%), "
+              "and how close they are (25%), within a 15-minute walk.")
 
     if score >= 80:
         verdict = "Highly walkable. Most daily needs are a short walk away."
@@ -917,7 +950,96 @@ def compute_access(graph: nx.Graph, nodes: dict[int, tuple[float, float]],
         "summary": summary,
         "total_reachable": total_reachable,
         "categories": categories,
+        "factors": factors,
+        "method": method,
         "zone": zone,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# What-If Studio: edit the network/amenities and recompute the impact
+# --------------------------------------------------------------------------- #
+
+
+def apply_whatif(base: dict[str, Any], interventions: list[dict[str, Any]],
+                 max_iv: int = 25) -> dict[str, Any]:
+    """Apply proposed changes to a copy of the cached graph and re-score.
+
+    Supported interventions:
+      - {"type": "add", "category": <key>, "lat": .., "lon": ..} - add an amenity
+      - {"type": "close", "lat": .., "lon": .., "radius": m} - close streets nearby
+    The base graph is never mutated; everything runs on a copy.
+    """
+    graph = base["_graph"].copy()
+    nodes = base["_nodes"]  # coordinates are read-only here
+    poi_cats: dict[str, Any] = {}
+    for key, info in base["pois"]["categories"].items():
+        poi_cats[key] = {
+            "label": info["label"],
+            "count": info["count"],
+            "geojson": {"type": "FeatureCollection",
+                        "features": list(info["geojson"]["features"])},
+        }
+    center = base["center"]
+    removed: list[dict[str, Any]] = []
+    added: list[dict[str, Any]] = []
+
+    for iv in (interventions or [])[:max_iv]:
+        kind = iv.get("type")
+        if kind == "add":
+            cat = iv.get("category")
+            if cat in poi_cats:
+                lat, lon = float(iv["lat"]), float(iv["lon"])
+                poi_cats[cat]["geojson"]["features"].append({
+                    "type": "Feature",
+                    "properties": {"name": "Proposed " + poi_cats[cat]["label"],
+                                   "category": cat, "kind": "proposed"},
+                    "geometry": {"type": "Point",
+                                 "coordinates": [round(lon, 6), round(lat, 6)]},
+                })
+                added.append({"lat": lat, "lon": lon, "category": cat})
+        elif kind == "close":
+            lat, lon = float(iv["lat"]), float(iv["lon"])
+            radius = min(float(iv.get("radius", 150)), 600)
+            drop = []
+            for u, v in graph.edges():
+                a, b = nodes.get(u), nodes.get(v)
+                if not a or not b:
+                    continue
+                if haversine_m(lat, lon, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2) <= radius:
+                    drop.append((u, v))
+            graph.remove_edges_from(drop)
+            for (u, v) in drop:
+                a, b = nodes[u], nodes[v]
+                removed.append({
+                    "type": "Feature", "properties": {},
+                    "geometry": {"type": "LineString",
+                                 "coordinates": [[a[1], a[0]], [b[1], b[0]]]},
+                })
+
+    new_access = compute_access(graph, nodes, poi_cats, center)
+    base_access = base.get("access")
+    delta = None
+    if base_access and new_access:
+        base_by = {c["key"]: c for c in base_access["categories"]}
+        cats = []
+        for c in new_access["categories"]:
+            before = base_by.get(c["key"], {}).get("count", 0)
+            cats.append({"key": c["key"], "label": c["label"],
+                         "before": before, "after": c["count"],
+                         "delta": c["count"] - before})
+        delta = {
+            "score_before": base_access["score"],
+            "score_after": new_access["score"],
+            "score_delta": new_access["score"] - base_access["score"],
+            "categories": cats,
+        }
+
+    return {
+        "new_access": new_access,
+        "delta": delta,
+        "removed_edges": {"type": "FeatureCollection", "features": removed},
+        "added": added,
     }
 
 
@@ -1026,28 +1148,51 @@ def build_demo_network(place: str, network_type: str, radius_m: int,
 # --------------------------------------------------------------------------- #
 
 
-@lru_cache(maxsize=64)
 def analyze(place: str, network_type: str, radius_m: int) -> dict[str, Any]:
-    lat, lon, display_name = geocode_place(place)
-    label = display_name if display_name else place
+    """Public entry: geocode, then delegate to the coord-keyed cache.
 
-    try:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            streets_future = pool.submit(
-                fetch_streets, lat, lon, radius_m, network_type
-            )
-            pois_future = pool.submit(fetch_pois, lat, lon, radius_m)
+    Keying the heavy work on rounded coordinates means /api/network and the
+    analytics endpoints share one cache entry even if the place strings differ
+    (typed name vs. 'lat,lon' vs. resolved label).
+    """
+    lat, lon, label = geocode_place(place)
+    base = _analyze_coords(round(lat, 5), round(lon, 5), network_type, radius_m)
+    # Overlay the human label without mutating the shared cached object.
+    out = dict(base)
+    out["stats"] = dict(base["stats"])
+    out["stats"]["place"] = label
+    return out
+
+
+@lru_cache(maxsize=64)
+def _analyze_coords(lat: float, lon: float, network_type: str,
+                    radius_m: int) -> dict[str, Any]:
+    label = f"{lat:.4f}, {lon:.4f}"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        streets_future = pool.submit(fetch_streets, lat, lon, radius_m, network_type)
+        pois_future = pool.submit(fetch_pois, lat, lon, radius_m)
+        try:
             raw_streets = streets_future.result()
+        except RuntimeError:
+            # No silent synthetic-data swap in production. Offline dev can opt in.
+            if os.environ.get("GIS_ALLOW_DEMO") == "1":
+                result = build_demo_network(label, network_type, radius_m, lat, lon)
+                result["pois"] = {"categories": {}, "total": 0, "shown": 0,
+                                  "capped": False}
+                result["insights"] = build_insights(result["stats"], result["pois"])
+                result["access"] = None
+                return result
+            raise
+        try:
             raw_pois = pois_future.result()
-        result = build_street_network(
-            raw_streets, label, lat, lon, radius_m, network_type,
-            "OpenStreetMap (Overpass live)",
-        )
-        pois = build_pois(raw_pois)
-    except RuntimeError:
-        result = build_demo_network(label, network_type, radius_m, lat, lon)
-        pois = {"categories": {}, "total": 0, "shown": 0, "capped": False}
+        except Exception:  # noqa: BLE001 - POIs are non-fatal; streets are core
+            raw_pois = {"elements": []}
 
+    result = build_street_network(
+        raw_streets, label, lat, lon, radius_m, network_type,
+        "OpenStreetMap (Overpass live)",
+    )
+    pois = build_pois(raw_pois)
     result["pois"] = pois
     result["insights"] = build_insights(result["stats"], pois)
     try:
@@ -1057,6 +1202,20 @@ def analyze(place: str, network_type: str, radius_m: int) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - access analysis is best-effort
         result["access"] = None
     return result
+
+
+def clamp_radius(raw: Any, network_type: str) -> int:
+    radius_m = min(max(int(raw), MIN_RADIUS_METERS), MAX_RADIUS_METERS)
+    if network_type == "all":
+        radius_m = min(radius_m, ALL_MODE_MAX_RADIUS)
+    return radius_m
+
+
+def friendly_error(exc: Exception) -> str:
+    message = str(exc)
+    if "Overpass" in message or "busy" in message:
+        return "The map data service is busy right now. Please try again in a moment."
+    return message
 
 
 # --------------------------------------------------------------------------- #
@@ -1074,6 +1233,7 @@ def index() -> Response:
         "route": url_for("gis.route"),
         "isochrone": url_for("gis.isochrone"),
         "centrality": url_for("gis.centrality"),
+        "whatif": url_for("gis.whatif"),
     }
     html = PAGE.replace("__GIS_CONFIG__", json.dumps(config))
     return Response(html, mimetype="text/html")
@@ -1092,7 +1252,12 @@ def geocode() -> Any:
     try:
         response = _session.get(
             f"{NOMINATIM_URL}/search",
-            params={"q": query, "format": "jsonv2", "limit": 6},
+            params={
+                "q": query,
+                "format": "jsonv2",
+                "limit": 6,
+                "accept-language": "en",
+            },
             timeout=HTTP_TIMEOUT,
         )
         response.raise_for_status()
@@ -1118,7 +1283,7 @@ def network() -> Any:
         place = f"{lat_raw},{lon_raw}"
 
     network_type = request.args.get("network", "drive").strip().lower()
-    radius_raw = request.args.get("radius", "3000")
+    radius_raw = request.args.get("radius", "1500")
 
     if not place:
         return jsonify({"error": "Enter a country, city, or place name."}), 400
@@ -1126,8 +1291,8 @@ def network() -> Any:
         return jsonify({"error": "Choose drive, walk, bike, or all."}), 400
 
     try:
-        radius_m = min(max(int(radius_raw), MIN_RADIUS_METERS), MAX_RADIUS_METERS)
-    except ValueError:
+        radius_m = clamp_radius(radius_raw, network_type)
+    except (ValueError, TypeError):
         return jsonify({"error": "Radius must be a number."}), 400
 
     try:
@@ -1135,7 +1300,7 @@ def network() -> Any:
         public = {k: v for k, v in result.items() if not k.startswith("_")}
         return jsonify(public)
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 502
+        return jsonify({"error": friendly_error(exc)}), 502
 
 
 def _load_graph() -> tuple[nx.Graph, dict, str]:
@@ -1145,10 +1310,9 @@ def _load_graph() -> tuple[nx.Graph, dict, str]:
     if network_type not in NETWORK_TYPES:
         network_type = "drive"
     try:
-        radius_m = min(max(int(request.args.get("radius", "3000")),
-                           MIN_RADIUS_METERS), MAX_RADIUS_METERS)
-    except ValueError:
-        radius_m = 3000
+        radius_m = clamp_radius(request.args.get("radius", "1500"), network_type)
+    except (ValueError, TypeError):
+        radius_m = 1500
     result = analyze(place, network_type, radius_m)
     return result["_graph"], result["_nodes"], network_type
 
@@ -1164,7 +1328,7 @@ def route() -> Any:
     except (KeyError, ValueError):
         return jsonify({"error": "Provide from_lat, from_lon, to_lat, to_lon."}), 400
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 502
+        return jsonify({"error": friendly_error(exc)}), 502
 
 
 @gis.get("/api/isochrone")
@@ -1178,7 +1342,7 @@ def isochrone() -> Any:
     except (KeyError, ValueError):
         return jsonify({"error": "Provide lat, lon, and minutes."}), 400
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 502
+        return jsonify({"error": friendly_error(exc)}), 502
 
 
 @gis.get("/api/centrality")
@@ -1187,7 +1351,28 @@ def centrality() -> Any:
         graph, nodes, _ = _load_graph()
         return jsonify(compute_centrality(graph, nodes))
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 502
+        return jsonify({"error": friendly_error(exc)}), 502
+
+
+@gis.post("/api/whatif")
+def whatif() -> Any:
+    body = request.get_json(silent=True) or {}
+    place = (body.get("place") or DEFAULT_PLACE).strip()
+    network_type = (body.get("network") or "drive").strip().lower()
+    if network_type not in NETWORK_TYPES:
+        network_type = "drive"
+    try:
+        radius_m = clamp_radius(body.get("radius", 1500), network_type)
+    except (ValueError, TypeError):
+        radius_m = 1500
+    interventions = body.get("interventions")
+    if not isinstance(interventions, list) or not interventions:
+        return jsonify({"error": "Add at least one change first."}), 400
+    try:
+        base = analyze(place, network_type, radius_m)
+        return jsonify(apply_whatif(base, interventions))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": friendly_error(exc)}), 502
 
 
 # --------------------------------------------------------------------------- #
@@ -1305,6 +1490,18 @@ PAGE = r"""<!doctype html>
     .foot strong{display:block;color:#344054;font-size:12px;margin-bottom:4px}
     .foot span{display:block;margin-top:4px}
     .foot a{color:var(--accent)}
+    details.method{margin-top:10px}
+    details.method>summary{cursor:pointer;font-size:12px;font-weight:700;color:var(--accent);list-style:none}
+    details.method>summary::-webkit-details-marker{display:none}
+    details.method>summary::after{content:" +"}
+    details.method[open]>summary::after{content:" -"}
+    .whatif h2{display:flex;align-items:center;gap:8px}
+    .whatif h2::before{content:"";width:9px;height:9px;border-radius:50%;background:#7c3aed}
+    button.armed{background:var(--accent)!important;color:#fff!important;border-color:var(--accent)!important}
+    .wi-delta{margin-top:12px;padding:11px;border-radius:8px;border:1px solid #e4eaf3;background:#f8fafc}
+    .wi-delta .big{font-size:16px;font-weight:800;line-height:1.3}
+    .wi-delta .up{color:#12b76a}.wi-delta .down{color:#f04438}.wi-delta .flat{color:var(--muted)}
+    .wi-row{display:flex;justify-content:space-between;gap:8px;font-size:12px;margin-top:5px}
     main{position:relative;min-width:0;height:100vh}
     #map{position:absolute;inset:0;background:#e8eef6}
     .map-card{position:absolute;z-index:500;right:18px;top:18px;width:min(420px,calc(100% - 36px));
@@ -1355,7 +1552,7 @@ PAGE = r"""<!doctype html>
       <form id="searchForm" autocomplete="off">
         <label for="place">Country, city, place, or "lat, lon"</label>
         <div class="field">
-          <input id="place" name="place" value="Amman, Jordan"
+          <input id="place" name="place" value="San Francisco, California"
             aria-label="Search location" aria-autocomplete="list">
           <div id="suggest" class="suggest" role="listbox" aria-label="Suggestions"></div>
         </div>
@@ -1373,8 +1570,8 @@ PAGE = r"""<!doctype html>
             <label for="radius">Radius</label>
             <select id="radius" name="radius">
               <option value="1000">1 km</option>
-              <option value="1500">1.5 km</option>
-              <option value="3000" selected>3 km</option>
+              <option value="1500" selected>1.5 km</option>
+              <option value="3000">3 km</option>
               <option value="5000">5 km</option>
               <option value="8000">8 km</option>
               <option value="10000">10 km</option>
@@ -1386,11 +1583,11 @@ PAGE = r"""<!doctype html>
           <button id="locateButton" type="button" class="ghost" title="Use my location">My location</button>
         </div>
         <div class="chips" id="chips">
-          <button class="chip" type="button" data-place="Dubai, United Arab Emirates">Dubai</button>
-          <button class="chip" type="button" data-place="San Francisco, California">San Francisco</button>
-          <button class="chip" type="button" data-place="Tokyo, Japan">Tokyo</button>
-          <button class="chip" type="button" data-place="Riyadh, Saudi Arabia">Riyadh</button>
           <button class="chip" type="button" data-place="London, United Kingdom">London</button>
+          <button class="chip" type="button" data-place="Tokyo, Japan">Tokyo</button>
+          <button class="chip" type="button" data-place="Paris, France">Paris</button>
+          <button class="chip" type="button" data-place="New York, New York">New York</button>
+          <button class="chip" type="button" data-place="Amman, Jordan">Amman</button>
         </div>
       </form>
 
@@ -1404,6 +1601,33 @@ PAGE = r"""<!doctype html>
         </div>
         <div class="access-grid" id="accessGrid"></div>
         <p class="subtitle" id="accessSummary" style="margin-top:10px"></p>
+        <details class="method">
+          <summary>How this score is calculated</summary>
+          <p class="subtitle" id="accessMethod"></p>
+        </details>
+      </section>
+
+      <section class="card whatif" id="whatifCard">
+        <h2>What-If Studio</h2>
+        <p class="subtitle">Propose a change and see the walkability impact, recomputed on the live street graph.</p>
+        <div class="grid">
+          <select id="wiCategory" aria-label="Amenity type">
+            <option value="food_retail">Groceries &amp; dining</option>
+            <option value="healthcare">Healthcare</option>
+            <option value="education">Schools &amp; learning</option>
+            <option value="transit">Transit &amp; fuel</option>
+            <option value="civic">Civic &amp; banking</option>
+            <option value="leisure">Parks &amp; leisure</option>
+          </select>
+          <button class="ghost" type="button" id="wiAddBtn">Add a place</button>
+        </div>
+        <button class="ghost" type="button" id="wiCloseBtn" style="margin-top:8px">Close a street / area</button>
+        <p class="subtitle" id="wiHint" style="margin-top:8px">Pick a mode, then click the map to drop changes.</p>
+        <div class="grid" style="margin-top:8px">
+          <button class="primary" type="button" id="wiRun" disabled>Recompute</button>
+          <button class="ghost" type="button" id="wiReset" disabled>Reset</button>
+        </div>
+        <div id="wiResult"></div>
       </section>
 
       <section class="card">
@@ -1470,7 +1694,7 @@ PAGE = r"""<!doctype html>
         <span id="mapSubtitle">A fresh street graph is built from OpenStreetMap for the selected location.</span>
         <div class="legend" id="legend"></div>
       </div>
-      <div id="status" class="status">Loading Amman as the opening example...</div>
+      <div id="status" class="status" role="status" aria-live="polite">Loading San Francisco as the opening example...</div>
     </main>
   </div>
 
@@ -1487,7 +1711,7 @@ PAGE = r"""<!doctype html>
     const POI_COLORS = {healthcare:"#e11d48",education:"#7c3aed",food_retail:"#d97706",
       transit:"#2563eb",civic:"#0f766e",leisure:"#16a34a"};
 
-    const map = L.map("map",{preferCanvas:true,zoomControl:true}).setView([31.95,35.93],12);
+    const map = L.map("map",{preferCanvas:true,zoomControl:true}).setView([37.7749,-122.4194],13);
     const light = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
       {maxZoom:20,crossOrigin:true,attribution:"&copy; OpenStreetMap contributors &copy; CARTO"}).addTo(map);
     const dark = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
@@ -1498,6 +1722,7 @@ PAGE = r"""<!doctype html>
 
     let streetLayer=null, haloLayer=null, lastData=null, walkZoneLayer=null;
     let poiLayers={};
+    let wiMode=null, wiInterventions=[], wiMarkers=[], wiZoneLayer=null, wiClosedLayer=null;
 
     function roadType(f){const v=f.properties.highway||"unclassified";return Array.isArray(v)?v[0]:v;}
     function styleRoad(f){const t=roadType(f);const major=["motorway","trunk","primary"].includes(t);
@@ -1554,7 +1779,12 @@ PAGE = r"""<!doctype html>
       const ring=$("scoreRing");
       if(!a){ring.style.setProperty("--p",0);$("accessScore").textContent="--";
         $("accessVerdict").textContent="No walk analysis available for this area.";
-        $("accessGrid").innerHTML="";$("accessSummary").textContent="";return;}
+        $("accessGrid").innerHTML="";$("accessSummary").textContent="";
+        if($("accessMethod"))$("accessMethod").textContent="";return;}
+      if($("accessMethod")&&a.method){
+        const f=a.factors||{};
+        $("accessMethod").textContent=`${a.method} For this area — coverage ${Math.round((f.coverage||0)*100)}%, abundance ${Math.round((f.abundance||0)*100)}%, proximity ${Math.round((f.proximity||0)*100)}%. Capped at 99. Data: OpenStreetMap.`;
+      }
       ring.style.setProperty("--p",a.score);
       const col=a.score>=80?"#12b76a":a.score>=60?"#84cc16":a.score>=40?"#f79009":"#f04438";
       ring.style.setProperty("--ring",col);
@@ -1727,6 +1957,7 @@ PAGE = r"""<!doctype html>
       if($("centralityBtn"))$("centralityBtn").classList.remove("on");
     }
     function setMode(name){
+      if(wiMode)wiSetMode(null);   // tools and What-If are mutually exclusive
       activeMode=activeMode===name?null:name;
       Object.entries(modeBtns).forEach(([k,b])=>b&&b.classList.toggle("on",k===activeMode));
       map.getContainer().style.cursor=activeMode?"crosshair":"";
@@ -1736,6 +1967,7 @@ PAGE = r"""<!doctype html>
       else if(lastData)setStatus(`Analysis ready: ${lastData.stats.place}`,"");
     }
     map.on("click",(e)=>{
+      if(wiMode){onWhatifClick(e);return;}
       if(activeMode==="measure")onMeasureClick(e);
       else if(activeMode==="route")onRouteClick(e);
       else if(activeMode==="iso")onIsoClick(e);
@@ -1855,6 +2087,77 @@ PAGE = r"""<!doctype html>
           analyze({lat:latitude,lon:longitude});},
         ()=>setStatus("Could not get your location.","error"),{timeout:8000});
     });
+
+    /* ----- What-If Studio ----- */
+    function wiSetMode(mode){
+      wiMode=(wiMode===mode)?null:mode;
+      if(wiMode){activeMode=null;Object.values(modeBtns).forEach(b=>b&&b.classList.remove("on"));}
+      $("wiAddBtn").classList.toggle("armed",wiMode==="add");
+      $("wiCloseBtn").classList.toggle("armed",wiMode==="close");
+      map.getContainer().style.cursor=wiMode?"crosshair":"";
+      if(wiMode==="add")$("wiHint").textContent=`Click the map to place a ${$("wiCategory").selectedOptions[0].text.toLowerCase()}.`;
+      else if(wiMode==="close")$("wiHint").textContent="Click the map to close streets around that point.";
+      else if(!wiInterventions.length)$("wiHint").textContent="Pick a mode, then click the map to drop changes.";
+    }
+    function onWhatifClick(e){
+      if(wiMode==="add"){
+        const cat=$("wiCategory").value, label=$("wiCategory").selectedOptions[0].text;
+        wiInterventions.push({type:"add",category:cat,lat:e.latlng.lat,lon:e.latlng.lng});
+        wiMarkers.push(L.circleMarker(e.latlng,{radius:7,color:"#fff",weight:2,fillColor:"#12b76a",fillOpacity:1})
+          .bindTooltip("+ "+label,{direction:"top"}).addTo(map));
+      } else if(wiMode==="close"){
+        wiInterventions.push({type:"close",lat:e.latlng.lat,lon:e.latlng.lng,radius:150});
+        wiMarkers.push(L.circle(e.latlng,{radius:150,color:"#f04438",weight:2,fillColor:"#f04438",fillOpacity:.12})
+          .bindTooltip("Closed area",{direction:"top"}).addTo(map));
+      } else return;
+      $("wiRun").disabled=false;$("wiReset").disabled=false;
+      $("wiHint").textContent=`${wiInterventions.length} change${wiInterventions.length>1?"s":""} staged. Click Recompute.`;
+    }
+    async function wiRecompute(){
+      if(!lastData||!wiInterventions.length)return;
+      $("wiRun").disabled=true;setStatus("Recomputing walkability with your changes...","busy");
+      try{
+        const res=await fetch(CONFIG.whatif,{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify(Object.assign({},lastQuery,{interventions:wiInterventions}))});
+        const d=await res.json();
+        if(!res.ok)throw new Error(d.error||"Recompute failed");
+        renderWhatif(d);setStatus("What-If result ready. Reset to restore the original.","");
+      }catch(err){setStatus(err.message,"error");}
+      finally{$("wiRun").disabled=false;}
+    }
+    function renderWhatif(d){
+      if(walkZoneLayer){map.removeLayer(walkZoneLayer);walkZoneLayer=null;}
+      if(wiZoneLayer){map.removeLayer(wiZoneLayer);wiZoneLayer=null;}
+      if(wiClosedLayer){map.removeLayer(wiClosedLayer);wiClosedLayer=null;}
+      if(d.new_access&&d.new_access.zone){
+        wiZoneLayer=L.geoJSON(d.new_access.zone,{style:{color:"#7c3aed",weight:2,dashArray:"4 4",
+          fillColor:"#7c3aed",fillOpacity:.08}}).addTo(map);
+        wiZoneLayer.bringToBack();
+      }
+      if(d.removed_edges&&d.removed_edges.features.length){
+        wiClosedLayer=L.geoJSON(d.removed_edges,{style:{color:"#f04438",weight:3,opacity:.9}}).addTo(map);
+      }
+      if(d.new_access)renderAccess(d.new_access);
+      const dl=d.delta;
+      if(!dl){$("wiResult").innerHTML="";return;}
+      const s=dl.score_delta, cls=s>0?"up":s<0?"down":"flat", sign=s>0?"+":"";
+      const rows=dl.categories.filter(c=>c.delta!==0).map(c=>
+        `<div class="wi-row"><span>${c.label}</span><span class="${c.delta>0?'up':'down'}">${c.before} &rarr; ${c.after} (${c.delta>0?'+':''}${c.delta})</span></div>`).join("");
+      $("wiResult").innerHTML=`<div class="wi-delta"><div class="big">Walk score ${dl.score_before} &rarr; <span class="${cls}">${dl.score_after} (${sign}${s})</span></div>${rows||'<div class="wi-row"><span>No category change within a 15-minute walk.</span></div>'}</div>`;
+    }
+    function wiResetAll(){
+      wiInterventions=[];wiMarkers.forEach(m=>map.removeLayer(m));wiMarkers=[];
+      if(wiZoneLayer){map.removeLayer(wiZoneLayer);wiZoneLayer=null;}
+      if(wiClosedLayer){map.removeLayer(wiClosedLayer);wiClosedLayer=null;}
+      wiSetMode(null);$("wiAddBtn").classList.remove("armed");$("wiCloseBtn").classList.remove("armed");
+      $("wiRun").disabled=true;$("wiReset").disabled=true;$("wiResult").innerHTML="";
+      $("wiHint").textContent="Pick a mode, then click the map to drop changes.";
+      if(lastData){renderAccess(lastData.access);renderNetwork(lastData);}
+    }
+    $("wiAddBtn").addEventListener("click",()=>wiSetMode("add"));
+    $("wiCloseBtn").addEventListener("click",()=>wiSetMode("close"));
+    $("wiRun").addEventListener("click",wiRecompute);
+    $("wiReset").addEventListener("click",wiResetAll);
 
     analyze();
   </script>
