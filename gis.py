@@ -60,6 +60,27 @@ ACCESS_LABELS = {
     "leisure": "Parks & leisure",
 }
 
+# "Ask the City" - the LLM is grounded strictly on the computed fact sheet.
+ASK_MODEL = os.environ.get("GIS_ASK_MODEL", "claude-opus-4-8")
+ASK_SYSTEM = (
+    "You are a city analyst for GeoPulse GIS. Answer the user's question about a "
+    "place using ONLY the JSON facts in the user message. Those facts were computed "
+    "from live OpenStreetMap data.\n"
+    "Rules:\n"
+    "- Use only the numbers and categories in the JSON. Never invent places, street "
+    "names, neighbourhoods, distances, prices, or statistics that are not present.\n"
+    "- If the facts do not contain enough to answer, say so plainly and suggest what "
+    "to analyse instead (a different travel mode or radius).\n"
+    "- Be concise and plain-spoken for a non-expert: 2-4 short sentences or a few "
+    "bullets. Lead with the direct answer.\n"
+    "- Cite the relevant numbers (e.g. 'walkability 82/100', '12 groceries & dining "
+    "within a 15-minute walk').\n"
+    "- Do not output your reasoning or preamble, and do not say 'based on the data'. "
+    "Give only the answer.\n"
+    "- Walkability and counts are estimates from mapped data, not a survey; do not "
+    "overstate certainty."
+)
+
 OVERPASS_ENDPOINTS = [
     endpoint
     for endpoint in [
@@ -1044,6 +1065,35 @@ def apply_whatif(base: dict[str, Any], interventions: list[dict[str, Any]],
     }
 
 
+def build_fact_sheet(result: dict[str, Any]) -> dict[str, Any]:
+    """A compact, grounded summary the LLM narrates - real numbers only."""
+    stats = result["stats"]
+    access = result.get("access") or {}
+    pois = result.get("pois") or {}
+    access_cats = [
+        {"category": c["label"], "within_15min_walk": c["count"],
+         "nearest_walk_min": c["nearest_min"]}
+        for c in (access.get("categories") or [])
+    ]
+    return {
+        "place": stats["place"],
+        "travel_mode": stats["network_type"],
+        "analysis_radius_m": stats["radius_m"],
+        "walkability_score_0_100": access.get("score"),
+        "walkability_verdict": access.get("verdict"),
+        "street_segments": stats["edges"],
+        "intersections": stats["intersections"],
+        "total_street_km": stats["total_km"],
+        "street_density_km_per_km2": stats["km_per_sqkm"],
+        "grid_order_0_100": stats.get("grid_order"),
+        "dead_end_ratio": stats.get("dead_end_ratio"),
+        "avg_segment_m": stats.get("avg_segment_m"),
+        "points_of_interest_total": pois.get("total"),
+        "everyday_access_within_15min_walk": access_cats,
+        "data_source": stats.get("source"),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Demo fallback (clearly labelled - used only when Overpass is unreachable)
 # --------------------------------------------------------------------------- #
@@ -1235,6 +1285,7 @@ def index() -> Response:
         "isochrone": url_for("gis.isochrone"),
         "centrality": url_for("gis.centrality"),
         "whatif": url_for("gis.whatif"),
+        "ask": url_for("gis.ask"),
     }
     html = PAGE.replace("__GIS_CONFIG__", json.dumps(config))
     return Response(html, mimetype="text/html")
@@ -1376,6 +1427,61 @@ def whatif() -> Any:
         return jsonify({"error": friendly_error(exc)}), 502
 
 
+@gis.post("/api/ask")
+def ask() -> Any:
+    body = request.get_json(silent=True) or {}
+    question = (body.get("question") or "").strip()[:500]
+    if not question:
+        return jsonify({"error": "Ask a question first."}), 400
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return jsonify({
+            "error": "Ask the City is not enabled yet. The site owner needs to set "
+                     "ANTHROPIC_API_KEY on the server.",
+            "configured": False,
+        }), 503
+    try:
+        import anthropic
+    except Exception:  # noqa: BLE001
+        return jsonify({"error": "Ask the City is unavailable (missing dependency).",
+                        "configured": False}), 503
+
+    place = (body.get("place") or DEFAULT_PLACE).strip()
+    network_type = (body.get("network") or "drive").strip().lower()
+    if network_type not in NETWORK_TYPES:
+        network_type = "drive"
+    try:
+        radius_m = clamp_radius(body.get("radius", 1500), network_type)
+    except (ValueError, TypeError):
+        radius_m = 1500
+
+    try:
+        result = analyze(place, network_type, radius_m)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": friendly_error(exc)}), 502
+
+    facts = build_fact_sheet(result)
+    user_content = (f"City facts (JSON):\n{json.dumps(facts)}\n\n"
+                    f"Question: {question}")
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        # No thinking (off by default on Opus 4.8) keeps this fast for serverless.
+        message = client.messages.create(
+            model=ASK_MODEL,
+            max_tokens=800,
+            system=ASK_SYSTEM,
+            messages=[{"role": "user", "content": user_content}],
+        )
+        answer = "".join(
+            b.text for b in message.content if getattr(b, "type", None) == "text"
+        ).strip()
+        return jsonify({"answer": answer or "No answer was produced.",
+                        "place": result["stats"]["place"]})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"Ask the City failed: {exc}"}), 502
+
+
 # --------------------------------------------------------------------------- #
 # Frontend (single page; __GIS_CONFIG__ is replaced at request time)
 # --------------------------------------------------------------------------- #
@@ -1498,6 +1604,11 @@ PAGE = r"""<!doctype html>
     details.method[open]>summary::after{content:" -"}
     .whatif h2{display:flex;align-items:center;gap:8px}
     .whatif h2::before{content:"";width:9px;height:9px;border-radius:50%;background:#7c3aed}
+    .ask h2{display:flex;align-items:center;gap:8px}
+    .ask h2::before{content:"";width:9px;height:9px;border-radius:50%;background:#2563eb}
+    .ask-answer{margin-top:11px;font-size:13px;line-height:1.55;color:#344054;white-space:pre-wrap}
+    .ask-answer:empty{display:none}
+    .ask-answer.loading{color:var(--muted)}
     button.armed{background:var(--accent)!important;color:#fff!important;border-color:var(--accent)!important}
     .wi-delta{margin-top:12px;padding:11px;border-radius:8px;border:1px solid #e4eaf3;background:#f8fafc}
     .wi-delta .big{font-size:16px;font-weight:800;line-height:1.3}
@@ -1606,6 +1717,22 @@ PAGE = r"""<!doctype html>
           <summary>How this score is calculated</summary>
           <p class="subtitle" id="accessMethod"></p>
         </details>
+      </section>
+
+      <section class="card ask" id="askCard">
+        <h2>Ask the City</h2>
+        <p class="subtitle">Ask a question in plain English. Answers are grounded in this location's real data.</p>
+        <div class="field">
+          <input id="askInput" placeholder="e.g. Is this a good area to live without a car?"
+            aria-label="Ask a question about this place">
+        </div>
+        <div class="chips" id="askChips">
+          <button class="chip" type="button" data-q="Is this a good area to live without a car, and why?">Car-free living?</button>
+          <button class="chip" type="button" data-q="What everyday services are missing within a short walk here?">What's missing?</button>
+          <button class="chip" type="button" data-q="How walkable is this area and what stands out about its streets?">How walkable?</button>
+        </div>
+        <button class="primary" type="button" id="askBtn" style="margin-top:10px">Ask</button>
+        <div id="askAnswer" class="ask-answer"></div>
       </section>
 
       <section class="card whatif" id="whatifCard">
@@ -2159,6 +2286,27 @@ PAGE = r"""<!doctype html>
     $("wiCloseBtn").addEventListener("click",()=>wiSetMode("close"));
     $("wiRun").addEventListener("click",wiRecompute);
     $("wiReset").addEventListener("click",wiResetAll);
+
+    /* ----- Ask the City ----- */
+    async function askCity(q){
+      const question=(q||$("askInput").value).trim();
+      if(!question)return;
+      const out=$("askAnswer");
+      $("askBtn").disabled=true;out.classList.add("loading");out.textContent="Analysing this place...";
+      try{
+        const res=await fetch(CONFIG.ask,{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify(Object.assign({},lastQuery||{place:$("place").value.trim(),
+            network:$("network").value,radius:$("radius").value},{question}))});
+        const d=await res.json();
+        if(!res.ok)throw new Error(d.error||"Ask failed");
+        out.classList.remove("loading");out.textContent=d.answer;
+      }catch(err){out.classList.remove("loading");out.textContent=err.message;}
+      finally{$("askBtn").disabled=false;}
+    }
+    $("askBtn").addEventListener("click",()=>askCity());
+    $("askInput").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();askCity();}});
+    $("askChips").addEventListener("click",e=>{const b=e.target.closest("[data-q]");
+      if(b){$("askInput").value=b.dataset.q;askCity(b.dataset.q);}});
 
     analyze();
   </script>
