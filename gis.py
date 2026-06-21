@@ -87,8 +87,11 @@ ASK_SYSTEM = (
     "names, neighbourhoods, distances, prices, or statistics that are not present.\n"
     "- If the facts do not contain enough to answer, say so plainly and suggest what "
     "to analyse instead (a different travel mode or radius).\n"
-    "- Be concise and plain-spoken for a non-expert: 2-4 short sentences or a few "
-    "bullets. Lead with the direct answer.\n"
+    "- Be concise and plain-spoken for a non-expert. Lead with a one-sentence "
+    "direct answer, then add detail.\n"
+    "- Format as clean Markdown. When listing things, use a bullet list with each "
+    "item on its own line starting with '- ', like '- **Healthcare:** 31 (nearest "
+    "7 min)'. Put a blank line before the list. Keep it tight (no more than ~6 bullets).\n"
     "- Cite the relevant numbers (e.g. 'walkability 82/100', '12 groceries & dining "
     "within a 15-minute walk').\n"
     "- Do not output your reasoning or preamble, and do not say 'based on the data'. "
@@ -1309,7 +1312,12 @@ def index() -> Response:
 
 @gis.get("/healthz")
 def healthz() -> Any:
-    return jsonify({"status": "ok"})
+    # Booleans only - never the secret value.
+    return jsonify({
+        "status": "ok",
+        "ask_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "upstash_configured": UPSTASH_ENABLED,
+    })
 
 
 @gis.get("/api/geocode")
@@ -1741,9 +1749,15 @@ PAGE = r"""<!doctype html>
     .whatif h2::before{content:"";width:9px;height:9px;border-radius:50%;background:#7c3aed}
     .ask h2{display:flex;align-items:center;gap:8px}
     .ask h2::before{content:"";width:9px;height:9px;border-radius:50%;background:#2563eb}
-    .ask-answer{margin-top:11px;font-size:13px;line-height:1.55;color:#344054;white-space:pre-wrap}
+    .ask-answer{margin-top:11px;font-size:13px;line-height:1.55;color:#344054}
     .ask-answer:empty{display:none}
     .ask-answer.loading{color:var(--muted)}
+    .ask-answer p{margin:0 0 8px}
+    .ask-answer p:last-child{margin-bottom:0}
+    .ask-answer p.h{font-weight:700;color:#101828;margin:10px 0 4px}
+    .ask-answer ul{margin:6px 0;padding-left:18px}
+    .ask-answer li{margin:3px 0}
+    .ask-answer strong{color:#101828}
     button.armed{background:var(--accent)!important;color:#fff!important;border-color:var(--accent)!important}
     .wi-delta{margin-top:12px;padding:11px;border-radius:8px;border:1px solid #e4eaf3;background:#f8fafc}
     .wi-delta .big{font-size:16px;font-weight:800;line-height:1.3}
@@ -2423,6 +2437,29 @@ PAGE = r"""<!doctype html>
     $("wiReset").addEventListener("click",wiResetAll);
 
     /* ----- Ask the City ----- */
+    function escapeHtml(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+    function inlineMd(s){
+      s=escapeHtml(s);
+      s=s.replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>");
+      s=s.replace(/(^|[^*])\*(?!\s)([^*]+?)\*(?!\*)/g,"$1<em>$2</em>");
+      return s;
+    }
+    function renderMarkdown(text){
+      const lines=(text||"").replace(/\r/g,"").split("\n");
+      let html="", inList=false;
+      const closeList=()=>{ if(inList){html+="</ul>";inList=false;} };
+      for(const raw of lines){
+        const line=raw.trim();
+        if(!line){closeList();continue;}
+        const li=line.match(/^[-*•]\s+(.*)$/);
+        if(li){ if(!inList){html+="<ul>";inList=true;} html+="<li>"+inlineMd(li[1])+"</li>"; continue; }
+        closeList();
+        const h=line.match(/^#{1,4}\s+(.*)$/);
+        html += h ? "<p class=\"h\">"+inlineMd(h[1])+"</p>" : "<p>"+inlineMd(line)+"</p>";
+      }
+      closeList();
+      return html || "<p></p>";
+    }
     async function askCity(q){
       const question=(q||$("askInput").value).trim();
       if(!question)return;
@@ -2434,7 +2471,7 @@ PAGE = r"""<!doctype html>
             network:$("network").value,radius:$("radius").value},{question}))});
         const d=await res.json();
         if(!res.ok)throw new Error(d.error||"Ask failed");
-        out.classList.remove("loading");out.textContent=d.answer;
+        out.classList.remove("loading");out.innerHTML=renderMarkdown(d.answer);
       }catch(err){out.classList.remove("loading");out.textContent=err.message;}
       finally{$("askBtn").disabled=false;}
     }
