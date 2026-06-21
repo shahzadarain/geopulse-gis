@@ -68,7 +68,16 @@ ASK_MODEL = os.environ.get("GIS_ASK_MODEL", "claude-opus-4-8")
 # on the Anthropic key remains the airtight backstop; these cut casual abuse.
 ASK_RATE_LIMIT = int(os.environ.get("GIS_ASK_RATE_LIMIT", "8"))   # requests
 ASK_RATE_WINDOW = int(os.environ.get("GIS_ASK_RATE_WINDOW", "60"))  # ...per seconds
-ASK_CACHE_MAX = 256
+ASK_CACHE_MAX = 256                                                 # in-memory entries
+ASK_CACHE_TTL = int(os.environ.get("GIS_ASK_CACHE_TTL", "86400"))  # shared-cache seconds
+
+# Optional Upstash Redis (REST) for cross-instance rate limiting + answer cache.
+# Accepts Upstash's own var names or Vercel KV's (which is Upstash-backed).
+UPSTASH_URL = (os.environ.get("UPSTASH_REDIS_REST_URL")
+               or os.environ.get("KV_REST_API_URL") or "").rstrip("/")
+UPSTASH_TOKEN = (os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+                 or os.environ.get("KV_REST_API_TOKEN") or "")
+UPSTASH_ENABLED = bool(UPSTASH_URL and UPSTASH_TOKEN)
 ASK_SYSTEM = (
     "You are a city analyst for GeoPulse GIS. Answer the user's question about a "
     "place using ONLY the JSON facts in the user message. Those facts were computed "
@@ -1434,10 +1443,34 @@ def whatif() -> Any:
         return jsonify({"error": friendly_error(exc)}), 502
 
 
-# Per-instance abuse controls for /api/ask (warm-Lambda scoped; pair with an
-# Anthropic spend cap for an airtight ceiling).
+# Abuse controls for /api/ask. Upstash Redis (REST) gives a single counter and
+# cache shared across all serverless instances; if it's unset or unreachable we
+# fall back to per-instance memory so the endpoint never breaks.
 _ask_rate: dict[str, list[float]] = {}
 _ask_cache: "OrderedDict[tuple, str]" = OrderedDict()
+
+
+def _upstash(command: list[Any]) -> Any:
+    """Run one Redis command via the Upstash REST API; returns its result."""
+    resp = _session.post(
+        UPSTASH_URL,
+        headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+        json=command,
+        timeout=5,
+    )
+    resp.raise_for_status()
+    return resp.json().get("result")
+
+
+def _upstash_pipeline(commands: list[list[Any]]) -> list[Any]:
+    resp = _session.post(
+        f"{UPSTASH_URL}/pipeline",
+        headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+        json=commands,
+        timeout=5,
+    )
+    resp.raise_for_status()
+    return [item.get("result") for item in resp.json()]
 
 
 def client_ip() -> str:
@@ -1447,7 +1480,7 @@ def client_ip() -> str:
     return request.remote_addr or "unknown"
 
 
-def ask_rate_limited(ip: str) -> bool:
+def _mem_rate_limited(ip: str) -> bool:
     now = time.time()
     record = _ask_rate.get(ip)
     if record is None or now - record[0] >= ASK_RATE_WINDOW:
@@ -1463,7 +1496,32 @@ def ask_rate_limited(ip: str) -> bool:
     return False
 
 
+def ask_rate_limited(ip: str) -> bool:
+    if UPSTASH_ENABLED:
+        try:
+            # Time-bucketed fixed window: the key rotates each window, so a plain
+            # EXPIRE keeps it a true fixed window without needing EXPIRE ... NX.
+            bucket = int(time.time() // ASK_RATE_WINDOW)
+            key = f"gis:rl:{ip}:{bucket}"
+            count = _upstash_pipeline(
+                [["INCR", key], ["EXPIRE", key, str(ASK_RATE_WINDOW)]]
+            )[0]
+            return int(count) > ASK_RATE_LIMIT
+        except Exception:  # noqa: BLE001 - degrade to per-instance limiting
+            pass
+    return _mem_rate_limited(ip)
+
+
+def _cache_key_str(key: tuple) -> str:
+    return "gis:ac:" + "|".join(str(part) for part in key)
+
+
 def ask_cache_get(key: tuple) -> str | None:
+    if UPSTASH_ENABLED:
+        try:
+            return _upstash(["GET", _cache_key_str(key)])  # None on miss
+        except Exception:  # noqa: BLE001 - fall back to memory
+            pass
     value = _ask_cache.get(key)
     if value is not None:
         _ask_cache.move_to_end(key)
@@ -1471,6 +1529,12 @@ def ask_cache_get(key: tuple) -> str | None:
 
 
 def ask_cache_put(key: tuple, value: str) -> None:
+    if UPSTASH_ENABLED:
+        try:
+            _upstash(["SET", _cache_key_str(key), value, "EX", str(ASK_CACHE_TTL)])
+            return
+        except Exception:  # noqa: BLE001 - fall back to memory
+            pass
     _ask_cache[key] = value
     _ask_cache.move_to_end(key)
     while len(_ask_cache) > ASK_CACHE_MAX:
