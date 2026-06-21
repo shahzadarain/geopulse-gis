@@ -1,0 +1,20 @@
+// How to wire shahzadasghar.org/gis to the Python backend.
+//
+// Edit D:\shahzadwebsite\connect-canvas\vercel.json and add the two /gis
+// rewrites ABOVE the existing SPA catch-all. Order matters: Vercel evaluates
+// rewrites top-to-bottom, and the catch-all "/(.*)" -> "/index.html" will
+// swallow /gis if it comes first.
+//
+// Replace BACKEND_HOST with the deployed host, e.g. geopulse-gis.onrender.com
+{
+  "redirects": [
+    { "source": "/projects", "destination": "/ai-projects", "statusCode": 301 },
+    { "source": "/agentic-ai-humanitarian", "destination": "/ai-projects", "statusCode": 301 },
+    { "source": "/ai-humanitarian", "destination": "/ai-projects", "statusCode": 301 }
+  ],
+  "rewrites": [
+    { "source": "/gis", "destination": "https://BACKEND_HOST/gis" },
+    { "source": "/gis/(.*)", "destination": "https://BACKEND_HOST/gis/$1" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

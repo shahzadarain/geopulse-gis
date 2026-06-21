@@ -1,0 +1,18 @@
+# Render.com blueprint. Push this repo to GitHub, then in Render choose
+# "New > Blueprint" and point it at the repo. The service comes up at
+# https://<name>.onrender.com/gis/ - use that host in the Vercel rewrite.
+services:
+  - type: web
+    name: geopulse-gis
+    runtime: python
+    # "starter" stays always-on (no cold starts). The free plan sleeps after
+    # ~15 min idle and takes ~30-50s to wake - fine for testing, not for a demo.
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: waitress-serve --listen=*:$PORT gis:app
+    healthCheckPath: /gis/healthz
+    envVars:
+      - key: GIS_URL_PREFIX
+        value: /gis
+      - key: PYTHON_VERSION
+        value: "3.12.6"
