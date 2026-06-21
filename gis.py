@@ -46,6 +46,17 @@ ORIENTATION_BINS = 36  # 10-degree bins for the street-orientation rose
 
 # Typical travel speeds (metres/second) used for routing time and isochrones.
 SPEED_MPS = {"drive": 11.1, "bike": 4.2, "walk": 1.4, "all": 1.4}
+ACCESS_MINUTES = 15  # the "15-minute neighbourhood" walk window
+
+# Plain-language labels for the everyday-access scorecard.
+ACCESS_LABELS = {
+    "food_retail": "Groceries & dining",
+    "healthcare": "Healthcare",
+    "education": "Schools & learning",
+    "transit": "Transit & fuel",
+    "civic": "Civic & banking",
+    "leisure": "Parks & leisure",
+}
 
 OVERPASS_ENDPOINTS = [
     endpoint
@@ -793,6 +804,124 @@ def compute_centrality(graph: nx.Graph, nodes: dict[int, tuple[float, float]],
 
 
 # --------------------------------------------------------------------------- #
+# Everyday access: the "15-minute neighbourhood" analysis for non-experts
+# --------------------------------------------------------------------------- #
+
+
+def build_node_grid(nodes: dict[int, tuple[float, float]], cell: float = 0.003):
+    """Coarse spatial buckets so points snap to a nearby node quickly."""
+    grid: dict[tuple[int, int], list[int]] = {}
+    for node_id, (lat, lon) in nodes.items():
+        grid.setdefault((round(lat / cell), round(lon / cell)), []).append(node_id)
+    return grid, cell
+
+
+def snap_to_node(grid, cell, nodes, lat: float, lon: float) -> int | None:
+    kx, ky = round(lat / cell), round(lon / cell)
+    best, best_d = None, float("inf")
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for node_id in grid.get((kx + dx, ky + dy), []):
+                nlat, nlon = nodes[node_id]
+                d = (nlat - lat) ** 2 + (nlon - lon) ** 2
+                if d < best_d:
+                    best_d, best = d, node_id
+    return best if best is not None else nearest_node(nodes, lat, lon)
+
+
+def compute_access(graph: nx.Graph, nodes: dict[int, tuple[float, float]],
+                   poi_categories: dict[str, Any], center: list[float],
+                   minutes: int = ACCESS_MINUTES) -> dict[str, Any] | None:
+    """How much of daily life is reachable on foot from the centre.
+
+    Walk distance is measured along the mapped street graph (Dijkstra), so the
+    counts and 'nearest' times are real, not straight-line guesses.
+    """
+    if not nodes or graph.number_of_nodes() == 0:
+        return None
+    speed = SPEED_MPS["walk"]
+    budget = minutes * 60 * speed
+
+    center_node = nearest_node(nodes, center[0], center[1])
+    if center_node is None:
+        return None
+    # Cutoff at the walk budget so Dijkstra stops early; POIs beyond it fall
+    # back to straight-line distance (they read as "none within N min" anyway).
+    dist = nx.single_source_dijkstra_path_length(
+        graph, center_node, cutoff=budget, weight="length"
+    )
+    grid, cell = build_node_grid(nodes)
+
+    categories: list[dict[str, Any]] = []
+    total_reachable = 0
+    for key, info in poi_categories.items():
+        count = 0
+        nearest_m: float | None = None
+        for feature in info["geojson"]["features"]:
+            lon, lat = feature["geometry"]["coordinates"]
+            node_id = snap_to_node(grid, cell, nodes, lat, lon)
+            d = dist.get(node_id)
+            if d is None:  # POI on a disconnected fragment - fall back to crow-flies
+                d = haversine_m(center[0], center[1], lat, lon)
+            if nearest_m is None or d < nearest_m:
+                nearest_m = d
+            if d <= budget:
+                count += 1
+        total_reachable += count
+        categories.append({
+            "key": key,
+            "label": ACCESS_LABELS.get(key, info["label"]),
+            "count": count,
+            "present": count > 0,
+            "nearest_m": round(nearest_m) if nearest_m is not None else None,
+            "nearest_min": round(nearest_m / speed / 60, 1) if nearest_m else None,
+        })
+
+    present = sum(1 for c in categories if c["present"])
+    total_cats = len(categories) or 1
+    coverage = present / total_cats
+    density = min(1.0, total_reachable / 30.0)
+    score = int(round(100 * (0.7 * coverage + 0.3 * density)))
+
+    if score >= 80:
+        verdict = "Highly walkable. Most daily needs are a short walk away."
+    elif score >= 60:
+        verdict = "Walkable. Many everyday services are within reach on foot."
+    elif score >= 40:
+        verdict = "Somewhat walkable. Some services are near; expect to travel for others."
+    else:
+        verdict = "Car-dependent. Few services are within a comfortable walk."
+
+    top = sorted((c for c in categories if c["count"]),
+                 key=lambda c: c["count"], reverse=True)[:3]
+    if top:
+        summary = (f"Within a {minutes}-minute walk: "
+                   + ", ".join(f"{c['count']} {c['label'].lower()}" for c in top) + ".")
+    else:
+        summary = f"No everyday services were found within a {minutes}-minute walk."
+
+    reachable_pts = [(nodes[n][1], nodes[n][0]) for n in dist]
+    hull = convex_hull(reachable_pts)
+    zone = None
+    if len(hull) >= 3:
+        zone = {
+            "type": "Feature",
+            "properties": {"minutes": minutes},
+            "geometry": {"type": "Polygon", "coordinates": [hull + [hull[0]]]},
+        }
+
+    return {
+        "minutes": minutes,
+        "score": score,
+        "verdict": verdict,
+        "summary": summary,
+        "total_reachable": total_reachable,
+        "categories": categories,
+        "zone": zone,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Demo fallback (clearly labelled - used only when Overpass is unreachable)
 # --------------------------------------------------------------------------- #
 
@@ -921,6 +1050,12 @@ def analyze(place: str, network_type: str, radius_m: int) -> dict[str, Any]:
 
     result["pois"] = pois
     result["insights"] = build_insights(result["stats"], pois)
+    try:
+        result["access"] = compute_access(
+            result["_graph"], result["_nodes"], pois["categories"], result["center"]
+        )
+    except Exception:  # noqa: BLE001 - access analysis is best-effort
+        result["access"] = None
     return result
 
 
@@ -1130,6 +1265,33 @@ PAGE = r"""<!doctype html>
     .decision{padding:9px 10px;margin-top:8px;background:#f8fafc;border:1px solid #e4eaf3;
       border-left:4px solid var(--accent);border-radius:7px;font-size:12px;line-height:1.4}
     .decision strong{display:block;margin-bottom:3px;font-size:13px}
+    .access-head{display:flex;align-items:center;gap:14px}
+    .score-ring{position:relative;width:74px;height:74px;border-radius:50%;flex:0 0 auto;
+      background:conic-gradient(var(--ring,#cbd5e1) calc(var(--p,0)*3.6deg), #e8edf5 0)}
+    .score-ring .inner{position:absolute;inset:6px;border-radius:50%;background:#fff;
+      display:grid;place-items:center;line-height:1}
+    .score-ring b{font-size:22px;color:var(--ink)}
+    .score-ring i{font-style:normal;font-size:10px;color:var(--muted)}
+    .access-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}
+    .acc{display:flex;align-items:flex-start;gap:8px;padding:8px 9px;background:#f8fafc;
+      border:1px solid #e4eaf3;border-radius:7px}
+    .acc .dot{margin-top:3px;width:10px;height:10px;border-radius:50%;flex:0 0 auto}
+    .acc .lbl{font-size:12px;font-weight:700;line-height:1.2}
+    .acc .meta{margin-top:2px;font-size:11px;color:var(--muted)}
+    details.details{padding:0}
+    details.details>summary{padding:14px;cursor:pointer;font-size:14px;font-weight:700;
+      color:#344054;list-style:none}
+    details.details>summary::-webkit-details-marker{display:none}
+    details.details>summary::after{content:"  +";color:var(--muted)}
+    details.details[open]>summary::after{content:"  -"}
+    details.details>*:not(summary){margin-left:14px;margin-right:14px}
+    details.details>*:last-child{margin-bottom:14px}
+    .sub-h{margin:16px 0 8px;font-size:13px;color:#344054}
+    .foot{padding:14px;color:var(--muted);font-size:11px;line-height:1.5;
+      border-top:1px solid var(--line)}
+    .foot strong{display:block;color:#344054;font-size:12px;margin-bottom:4px}
+    .foot span{display:block;margin-top:4px}
+    .foot a{color:var(--accent)}
     main{position:relative;min-width:0;height:100vh}
     #map{position:absolute;inset:0;background:#e8eef6}
     .map-card{position:absolute;z-index:500;right:18px;top:18px;width:min(420px,calc(100% - 36px));
@@ -1219,38 +1381,43 @@ PAGE = r"""<!doctype html>
         </div>
       </form>
 
-      <section class="stats" aria-label="Network statistics">
-        <div class="metric"><span>Street segments</span><strong id="m-edges">-</strong></div>
-        <div class="metric"><span>Intersections</span><strong id="m-int">-</strong></div>
-        <div class="metric"><span>Total length</span><strong id="m-len">-</strong></div>
-        <div class="metric"><span>Density</span><strong id="m-den">-</strong></div>
-        <div class="metric"><span>Connectivity index</span><strong id="m-conn">-</strong></div>
-        <div class="metric"><span>Points of interest</span><strong id="m-poi">-</strong></div>
+      <section class="card access" aria-label="Everyday access">
+        <div class="access-head">
+          <div class="score-ring" id="scoreRing"><div class="inner"><b id="accessScore">--</b><i>/100</i></div></div>
+          <div>
+            <h2 style="margin:0 0 4px">15-minute neighbourhood</h2>
+            <p class="subtitle" id="accessVerdict">See what you can reach on foot from here.</p>
+          </div>
+        </div>
+        <div class="access-grid" id="accessGrid"></div>
+        <p class="subtitle" id="accessSummary" style="margin-top:10px"></p>
       </section>
 
       <section class="card">
-        <h2>Road mix</h2>
-        <div id="roadMix"></div>
-      </section>
-
-      <section class="card">
-        <h2>Street orientation</h2>
-        <canvas id="rose" width="320" height="320"
-          style="display:block;margin:0 auto;width:100%;max-width:260px"></canvas>
-        <p class="subtitle" id="roseNote" style="text-align:center;margin-top:6px"></p>
-      </section>
-
-      <section class="card">
-        <h2>Points of interest</h2>
+        <h2>What is nearby</h2>
         <div id="poiToggles"></div>
       </section>
 
-      <section class="card">
-        <h2>Analysis</h2>
-        <p class="subtitle" id="insightLead">Run an analysis to compute network
-          structure and nearby services.</p>
+      <details class="card details">
+        <summary>Network details (for analysts)</summary>
+        <section class="stats" aria-label="Network statistics" style="margin-top:12px">
+          <div class="metric"><span>Street segments</span><strong id="m-edges">-</strong></div>
+          <div class="metric"><span>Intersections</span><strong id="m-int">-</strong></div>
+          <div class="metric"><span>Total length</span><strong id="m-len">-</strong></div>
+          <div class="metric"><span>Density</span><strong id="m-den">-</strong></div>
+          <div class="metric"><span>Connectivity index</span><strong id="m-conn">-</strong></div>
+          <div class="metric"><span>Points of interest</span><strong id="m-poi">-</strong></div>
+        </section>
+        <h3 class="sub-h">Road mix</h3>
+        <div id="roadMix"></div>
+        <h3 class="sub-h">Street orientation</h3>
+        <canvas id="rose" width="320" height="320"
+          style="display:block;margin:0 auto;width:100%;max-width:240px"></canvas>
+        <p class="subtitle" id="roseNote" style="text-align:center;margin-top:6px"></p>
+        <h3 class="sub-h">Computed insights</h3>
+        <p class="subtitle" id="insightLead">Run an analysis to compute network structure.</p>
         <div id="decisions"></div>
-      </section>
+      </details>
 
       <section class="card">
         <h2>Export</h2>
@@ -1258,9 +1425,15 @@ PAGE = r"""<!doctype html>
           <button class="ghost" type="button" id="exportGeo">GeoJSON</button>
           <button class="ghost" type="button" id="exportPng">PNG image</button>
         </div>
-        <p class="subtitle" style="margin-top:10px">Data &copy; OpenStreetMap
-          contributors (ODbL). Metrics are computed from the returned data.</p>
       </section>
+
+      <footer class="foot">
+        <strong>GeoPulse GIS</strong>
+        <span>Live analysis built from OpenStreetMap. Data &copy; OpenStreetMap
+          contributors, under the Open Database License (ODbL).</span>
+        <span>Walkability is estimated from mapped streets and points of interest,
+          not a survey. Part of <a href="/">shahzadasghar.com</a>.</span>
+      </footer>
     </aside>
 
     <main>
@@ -1310,7 +1483,7 @@ PAGE = r"""<!doctype html>
       {maxZoom:19,crossOrigin:true,attribution:"&copy; OpenStreetMap contributors"});
     L.control.layers({"Light":light,"Dark":dark,"OpenStreetMap":osm},{},{collapsed:true}).addTo(map);
 
-    let streetLayer=null, haloLayer=null, lastData=null;
+    let streetLayer=null, haloLayer=null, lastData=null, walkZoneLayer=null;
     let poiLayers={};
 
     function roadType(f){const v=f.properties.highway||"unclassified";return Array.isArray(v)?v[0]:v;}
@@ -1352,7 +1525,34 @@ PAGE = r"""<!doctype html>
         }).addTo(map);
       });
 
+      if(walkZoneLayer){map.removeLayer(walkZoneLayer);walkZoneLayer=null;}
+      const zone=data.access&&data.access.zone;
+      if(zone){
+        walkZoneLayer=L.geoJSON(zone,{style:{color:"#0f766e",weight:2,dashArray:"6 5",
+          fillColor:"#0f766e",fillOpacity:.08}}).addTo(map);
+        walkZoneLayer.bringToBack();
+        walkZoneLayer.bindTooltip(`Approx. ${zone.properties.minutes}-minute walk`,{sticky:true});
+      }
+
       try{map.fitBounds(data.bounds,{padding:[28,28]});}catch(e){}
+    }
+
+    function renderAccess(a){
+      const ring=$("scoreRing");
+      if(!a){ring.style.setProperty("--p",0);$("accessScore").textContent="--";
+        $("accessVerdict").textContent="No walk analysis available for this area.";
+        $("accessGrid").innerHTML="";$("accessSummary").textContent="";return;}
+      ring.style.setProperty("--p",a.score);
+      const col=a.score>=80?"#12b76a":a.score>=60?"#84cc16":a.score>=40?"#f79009":"#f04438";
+      ring.style.setProperty("--ring",col);
+      $("accessScore").textContent=a.score;
+      $("accessVerdict").textContent=a.verdict;
+      $("accessSummary").textContent=a.summary;
+      $("accessGrid").innerHTML=a.categories.map(c=>
+        `<div class="acc"><span class="dot" style="background:${POI_COLORS[c.key]||'#2563eb'};opacity:${c.present?1:.3}"></span>
+          <div><div class="lbl">${c.label}</div><div class="meta">${c.present
+            ?`${c.count} nearby &middot; nearest ${c.nearest_min} min`
+            :`none within ${a.minutes} min`}</div></div></div>`).join("");
     }
 
     function renderStats(s){
@@ -1424,7 +1624,7 @@ PAGE = r"""<!doctype html>
         if(typeof clearTools==="function")clearTools();
         renderNetwork(data);renderStats(data.stats);
         renderPois(data.pois||{categories:{}});renderInsights(data.insights||[]);
-        renderRose(data.orientation||{});
+        renderRose(data.orientation||{});renderAccess(data.access);
         const warn=data.stats.source.includes("unreachable");
         setStatus(`${warn?"Sample data shown - ":""}Analysis ready: ${data.stats.place}`,warn?"error":"");
       }catch(err){setStatus(err.message,"error");}
