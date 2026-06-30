@@ -2484,9 +2484,18 @@ PAGE = r"""<!doctype html>
       const dl=d.delta;
       if(!dl){$("wiResult").innerHTML="";return;}
       const s=dl.score_delta, cls=s>0?"up":s<0?"down":"flat", sign=s>0?"+":"";
-      const rows=dl.categories.filter(c=>c.delta!==0).map(c=>
-        `<div class="wi-row"><span>${c.label}</span><span class="${c.delta>0?'up':'down'}">${c.before} &rarr; ${c.after} (${c.delta>0?'+':''}${c.delta})</span></div>`).join("");
-      $("wiResult").innerHTML=`<div class="wi-delta"><div class="big">Walk score ${dl.score_before} &rarr; <span class="${cls}">${dl.score_after} (${sign}${s})</span></div>${rows||'<div class="wi-row"><span>No category change within a 15-minute walk.</span></div>'}</div>`;
+      const md=[];
+      const changed=dl.categories.filter(c=>c.delta!==0);
+      if(changed.length)changed.forEach(c=>md.push(`- **${c.label}:** ${c.before} → ${c.after} (${c.delta>0?"+":""}${c.delta})`));
+      else md.push("No category counts changed within a 15-minute walk.");
+      const adds=(d.added||[]).length, removed=(d.removed_edges&&d.removed_edges.features.length)||0, acts=[];
+      if(adds)acts.push(`added ${adds} place${adds>1?"s":""}`);
+      if(removed)acts.push(`closed ${removed} street segment${removed>1?"s":""}`);
+      if(acts.length)md.push(`\nChange applied: ${acts.join(" and ")}.`);
+      $("wiResult").innerHTML=
+        `<div class="wi-delta"><div class="big">Walk score ${dl.score_before} &rarr; `+
+        `<span class="${cls}">${dl.score_after} (${sign}${s})</span></div></div>`+
+        `<div class="ask-answer">${renderMarkdown(md.join("\n"))}</div>`;
     }
     function wiResetAll(){
       wiInterventions=[];wiMarkers.forEach(m=>map.removeLayer(m));wiMarkers=[];
