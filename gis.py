@@ -1636,19 +1636,19 @@ PAGE = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GeoPulse GIS — Live Walkability & Street Network Analysis</title>
-  <meta name="description" content="Analyze any city live from OpenStreetMap: a 15-minute walkability score, what you can reach on foot (groceries, healthcare, schools, transit, parks), shortest-path routing, travel-time reach, and street-network metrics. Built by Shahzad Asghar.">
-  <link rel="canonical" href="https://shahzadasghar.com/gis">
+  <title>GeoPulse GIS — Walkability Score & 15-Minute City Map</title>
+  <meta name="description" content="Free walkability score and 15-minute-city map for any city. From live OpenStreetMap data: what you can reach on foot (groceries, healthcare, schools, transit, parks), plus shortest-path routing, travel-time isochrones, and street-network metrics. Built by Shahzad Asghar.">
+  <link rel="canonical" href="https://shahzadasghar.com/gis/">
   <meta name="robots" content="index, follow">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://shahzadasghar.com/gis">
-  <meta property="og:title" content="GeoPulse GIS — Live Walkability & Street Network Analysis">
+  <meta property="og:url" content="https://shahzadasghar.com/gis/">
+  <meta property="og:title" content="GeoPulse GIS — Walkability Score & 15-Minute City Map">
   <meta property="og:description" content="Type any city and see, from real OpenStreetMap data, what you can reach in a 15-minute walk, plus routing, travel-time reach, and street-network analysis.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="GeoPulse GIS — Live Walkability & Street Network Analysis">
+  <meta name="twitter:title" content="GeoPulse GIS — Walkability Score & 15-Minute City Map">
   <meta name="twitter:description" content="Walkability scores, 15-minute-neighbourhood analysis, routing, and live street-network metrics for any city, from OpenStreetMap.">
   <script type="application/ld+json">
-  {"@context":"https://schema.org","@type":"WebApplication","name":"GeoPulse GIS","url":"https://shahzadasghar.com/gis","description":"Live geospatial analysis tool that scores any city's walkability, maps what is reachable within a 15-minute walk, and computes routing, travel-time reach, and street-network metrics from OpenStreetMap data.","applicationCategory":"GIS, mapping, urban analysis","operatingSystem":"Web","browserRequirements":"Requires JavaScript","isAccessibleForFree":true,"creator":{"@id":"https://shahzadasghar.com/#shahzad-asghar"}}
+  {"@context":"https://schema.org","@type":"WebApplication","name":"GeoPulse GIS","url":"https://shahzadasghar.com/gis/","description":"Free walkability-score and 15-minute-city map. Scores any city's walkability, maps what is reachable on foot, and computes shortest-path routing, travel-time isochrones, and street-network metrics from live OpenStreetMap data.","applicationCategory":"Geographic Information System","keywords":"walkability score, 15-minute city, walk score, OpenStreetMap, street network analysis, isochrones, points of interest, urban accessibility, pedestrian access","featureList":["15-minute walkability score","What you can reach on foot","Shortest-path routing","Travel-time isochrones (reach)","Street-network metrics","Points-of-interest layers","Natural-language Ask the City"],"operatingSystem":"Web","browserRequirements":"Requires JavaScript","isAccessibleForFree":true,"creator":{"@id":"https://shahzadasghar.com/#shahzad-asghar"}}
   </script>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
