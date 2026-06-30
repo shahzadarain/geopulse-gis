@@ -1728,6 +1728,15 @@ PAGE = r"""<!doctype html>
     .acc .dot{margin-top:3px;width:10px;height:10px;border-radius:50%;flex:0 0 auto}
     .acc .lbl{font-size:12px;font-weight:700;line-height:1.2}
     .acc .meta{margin-top:2px;font-size:11px;color:var(--muted)}
+    /* loading skeletons for the score card */
+    @keyframes shimmer{0%{background-position:-300px 0}100%{background-position:300px 0}}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    .skeleton{background:linear-gradient(90deg,#eef1f5 25%,#e1e6ee 37%,#eef1f5 63%);
+      background-size:600px 100%;animation:shimmer 1.25s linear infinite;border-radius:5px}
+    .score-ring.loading{background:#e6eaf0;animation:pulse 1.2s ease-in-out infinite}
+    .score-ring.loading .inner{background:#eef1f5}
+    .sk-line{height:9px;margin:2px 0;border-radius:5px}
+    .sk-line.short{width:60%}
     details.details{padding:0}
     details.details>summary{padding:14px;cursor:pointer;font-size:14px;font-weight:700;
       color:#344054;list-style:none}
@@ -2107,8 +2116,18 @@ PAGE = r"""<!doctype html>
       try{map.fitBounds(data.bounds,{padding:[28,28]});}catch(e){}
     }
 
+    function setAccessLoading(){
+      const ring=$("scoreRing");ring.classList.add("loading");
+      $("accessScore").textContent="";
+      $("accessVerdict").textContent="Analysing this location…";
+      $("accessSummary").textContent="";
+      if($("accessMethod"))$("accessMethod").textContent="";
+      $("accessGrid").innerHTML=Array.from({length:6}).map(()=>
+        '<div class="acc"><span class="dot skeleton"></span><div style="flex:1">'+
+        '<div class="sk-line skeleton"></div><div class="sk-line short skeleton"></div></div></div>').join("");
+    }
     function renderAccess(a){
-      const ring=$("scoreRing");
+      const ring=$("scoreRing");ring.classList.remove("loading");
       if(!a){ring.style.setProperty("--p",0);$("accessScore").textContent="--";
         $("accessVerdict").textContent="No walk analysis available for this area.";
         $("accessGrid").innerHTML="";$("accessSummary").textContent="";
@@ -2193,6 +2212,7 @@ PAGE = r"""<!doctype html>
       lastQuery={place,network:$("network").value,radius:$("radius").value};
       const params=new URLSearchParams(lastQuery);
       setLoading(true);setStatus(`Building street graph for ${place}...`,"busy");
+      setAccessLoading();
       try{
         const res=await fetch(`${CONFIG.network}?${params.toString()}`);
         const data=await res.json();
@@ -2204,7 +2224,7 @@ PAGE = r"""<!doctype html>
         renderRose(data.orientation||{});renderAccess(data.access);
         const warn=data.stats.source.includes("unreachable");
         setStatus(`${warn?"Sample data shown - ":""}Analysis ready: ${data.stats.place}`,warn?"error":"");
-      }catch(err){setStatus(err.message,"error");}
+      }catch(err){setStatus(err.message,"error");renderAccess(lastData?lastData.access:null);}
       finally{setLoading(false);}
     }
 
