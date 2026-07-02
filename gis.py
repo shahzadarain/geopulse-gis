@@ -1831,23 +1831,38 @@ PAGE = r"""<!doctype html>
     .legend span{display:flex;align-items:center;gap:7px;white-space:nowrap}
     .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;flex:0 0 auto}
     .legend b{margin-left:auto;color:#101828;font-weight:700}
+    .sheet-handle{display:none}
     @media (max-width:900px){
-      body{overflow:auto}
-      .shell{display:block;height:auto}
-      aside{height:auto;border-right:0;border-bottom:1px solid var(--line)}
-      main{height:66vh;min-height:440px}
+      html,body{overflow:hidden}
+      .shell{display:block;height:100vh}
+      main{position:fixed;inset:0;height:100vh;height:100dvh;min-height:0}
+      /* the sidebar becomes a draggable bottom sheet over the full-screen map */
+      aside{position:fixed;left:0;right:0;bottom:0;z-index:1000;width:auto;
+        height:88vh;height:88dvh;border:0;border-radius:16px 16px 0 0;
+        box-shadow:0 -10px 30px rgba(16,24,40,.22);padding:0 16px 24px;
+        overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
+        touch-action:pan-y;transform:translateY(var(--sheet-y,44vh));
+        transition:transform .3s cubic-bezier(.32,.72,0,1)}
+      aside.dragging{transition:none}
+      .sheet-handle{display:flex;position:sticky;top:0;z-index:5;justify-content:center;
+        align-items:center;height:26px;margin:0 -16px 8px;background:var(--panel);
+        border-radius:16px 16px 0 0;cursor:grab;touch-action:none;user-select:none}
+      .sheet-handle::before{content:"";width:42px;height:5px;border-radius:99px;background:#cbd5e1}
       .map-card{left:10px;right:10px;top:10px;width:auto}
-      .tools{left:10px;right:10px;top:auto;bottom:10px;max-width:none}
+      .tools{left:10px;right:10px;top:70px;bottom:auto;max-width:none}
       .tools-row{flex-wrap:nowrap;overflow-x:auto;justify-content:flex-start;-webkit-overflow-scrolling:touch}
       .tools .tool{flex:0 0 auto}
-      .status{bottom:76px}
+      .tools-hint{display:none}
+      .status{top:132px;bottom:auto}
       .legend-panel{display:none}
     }
   </style>
 </head>
 <body>
   <div class="shell">
-    <aside>
+    <aside id="sheet">
+      <div class="sheet-handle" id="sheetHandle" role="button" tabindex="0"
+        aria-label="Drag to resize the analysis panel"></div>
       <div>
         <div class="brand">
           <h1>GeoPulse GIS</h1>
@@ -2574,6 +2589,52 @@ PAGE = r"""<!doctype html>
     $("askInput").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();askCity();}});
     $("askChips").addEventListener("click",e=>{const b=e.target.closest("[data-q]");
       if(b){$("askInput").value=b.dataset.q;askCity(b.dataset.q);}});
+
+    /* ----- mobile draggable bottom sheet ----- */
+    (function(){
+      const sheet=$("sheet"), handle=$("sheetHandle");
+      if(!sheet||!handle)return;
+      const mq=window.matchMedia("(max-width:900px)");
+      let snaps=[0,0,0], curY=0, dragging=false, startPointer=0, startY=0;
+      function computeSnaps(){
+        const h=window.innerHeight, sheetH=0.88*h;
+        snaps=[0, Math.round(0.44*h), Math.round(sheetH-116)];  // full, half, peek
+      }
+      function setY(y){curY=y;sheet.style.setProperty("--sheet-y",y+"px");}
+      function nearest(y){return snaps.reduce((b,s)=>Math.abs(s-y)<Math.abs(b-y)?s:b,snaps[0]);}
+      function activate(){
+        if(!mq.matches){sheet.style.removeProperty("--sheet-y");if(map)map.invalidateSize();return;}
+        computeSnaps();setY(snaps[1]);if(map)setTimeout(()=>map.invalidateSize(),320);
+      }
+      function down(e){
+        if(!mq.matches)return;
+        dragging=true;sheet.classList.add("dragging");
+        startPointer=e.touches?e.touches[0].clientY:e.clientY;startY=curY;
+        try{handle.setPointerCapture&&e.pointerId!=null&&handle.setPointerCapture(e.pointerId);}catch(_){}
+      }
+      function move(e){
+        if(!dragging)return;
+        const y=e.touches?e.touches[0].clientY:e.clientY;
+        setY(Math.max(snaps[0],Math.min(snaps[2],startY+(y-startPointer))));
+        if(e.cancelable)e.preventDefault();
+      }
+      function up(){
+        if(!dragging)return;dragging=false;sheet.classList.remove("dragging");
+        if(Math.abs(curY-startY)<6)setY(curY>snaps[0]?snaps[0]:snaps[1]);  // tap = expand, or half if full
+        else setY(nearest(curY));
+      }
+      handle.addEventListener("pointerdown",down);
+      window.addEventListener("pointermove",move,{passive:false});
+      window.addEventListener("pointerup",up);
+      window.addEventListener("pointercancel",up);
+      handle.addEventListener("keydown",e=>{
+        if(e.key==="Enter"||e.key===" "){e.preventDefault();setY(curY>snaps[0]?snaps[0]:snaps[1]);}
+      });
+      mq.addEventListener("change",activate);
+      let rt;window.addEventListener("resize",()=>{clearTimeout(rt);rt=setTimeout(()=>{
+        if(mq.matches){computeSnaps();setY(Math.min(curY,snaps[2]));}if(map)map.invalidateSize();},150);});
+      activate();
+    })();
 
     analyze();
   </script>
