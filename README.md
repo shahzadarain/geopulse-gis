@@ -5,6 +5,24 @@ A single-file Flask application that builds a real street graph and a real POI
 layer from OpenStreetMap (Overpass API), geocodes with Nominatim, and computes
 every metric it shows directly from the returned data.
 
+> **This repo is not the deployed copy.**
+>
+> `gis.py` also lives in the website repo at `connect-canvas/gis.py`, and *that*
+> is what serves https://shahzadasghar.com/gis (via `api/index.py`; `vercel.json`
+> rewrites `/gis` to `/api/index` and pins `functions.includeFiles: "gis.py"`).
+> This repo is the standalone Docker/Render packaging and is not currently deployed.
+>
+> **Edit `connect-canvas/gis.py` first**, then sync here:
+>
+> ```bash
+> ./tools/check-drift.sh          # report differences
+> ./tools/check-drift.sh --sync   # pull the live version into this repo
+> ```
+>
+> The two copies silently diverged once. The live one had gained analytics, an SEO
+> section, the accessibility widget and `strict_slashes = False`, while fixes
+> committed here never reached production.
+
 ## Features
 
 - Search any country, city, place name, or `lat, lon` (with type-ahead

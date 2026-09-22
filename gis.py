@@ -1642,18 +1642,20 @@ PAGE = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GeoPulse GIS — Walkability Score & 15-Minute City Map</title>
-  <meta name="description" content="Free walkability score and 15-minute-city map for any city. From live OpenStreetMap data: what you can reach on foot (groceries, healthcare, schools, transit, parks), plus shortest-path routing, travel-time isochrones, and street-network metrics. Built by Shahzad Asghar.">
-  <link rel="canonical" href="https://shahzadasghar.com/gis/">
+  <meta name="description" content="Free walkability score and 15-minute-city map for any city, from live OpenStreetMap data, by Shahzad Asghar. Check what your streets reach on foot.">
+  <link rel="canonical" href="https://shahzadasghar.com/gis">
   <meta name="robots" content="index, follow">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://shahzadasghar.com/gis/">
+  <meta property="og:url" content="https://shahzadasghar.com/gis">
   <meta property="og:title" content="GeoPulse GIS — Walkability Score & 15-Minute City Map">
   <meta property="og:description" content="Type any city and see, from real OpenStreetMap data, what you can reach in a 15-minute walk, plus routing, travel-time reach, and street-network analysis.">
+  <meta property="og:image" content="https://shahzadasghar.com/og-image.png">
+  <meta name="twitter:image" content="https://shahzadasghar.com/og-image.png">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="GeoPulse GIS — Walkability Score & 15-Minute City Map">
   <meta name="twitter:description" content="Walkability scores, 15-minute-neighbourhood analysis, routing, and live street-network metrics for any city, from OpenStreetMap.">
   <script type="application/ld+json">
-  {"@context":"https://schema.org","@type":"WebApplication","name":"GeoPulse GIS","url":"https://shahzadasghar.com/gis/","description":"Free walkability-score and 15-minute-city map. Scores any city's walkability, maps what is reachable on foot, and computes shortest-path routing, travel-time isochrones, and street-network metrics from live OpenStreetMap data.","applicationCategory":"Geographic Information System","keywords":"walkability score, 15-minute city, walk score, OpenStreetMap, street network analysis, isochrones, points of interest, urban accessibility, pedestrian access","featureList":["15-minute walkability score","What you can reach on foot","Shortest-path routing","Travel-time isochrones (reach)","Street-network metrics","Points-of-interest layers","Natural-language Ask the City"],"operatingSystem":"Web","browserRequirements":"Requires JavaScript","isAccessibleForFree":true,"creator":{"@id":"https://shahzadasghar.com/#shahzad-asghar"}}
+  {"@context":"https://schema.org","@type":"WebApplication","name":"GeoPulse GIS","url":"https://shahzadasghar.com/gis","description":"Free walkability-score and 15-minute-city map. Scores any city's walkability, maps what is reachable on foot, and computes shortest-path routing, travel-time isochrones, and street-network metrics from live OpenStreetMap data.","applicationCategory":"Geographic Information System","keywords":"walkability score, 15-minute city, walk score, OpenStreetMap, street network analysis, isochrones, points of interest, urban accessibility, pedestrian access","featureList":["15-minute walkability score","What you can reach on foot","Shortest-path routing","Travel-time isochrones (reach)","Street-network metrics","Points-of-interest layers","Natural-language Ask the City"],"operatingSystem":"Web","browserRequirements":"Requires JavaScript","isAccessibleForFree":true,"creator":{"@id":"https://shahzadasghar.com/#shahzad-asghar"}}
   </script>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
@@ -1862,6 +1864,14 @@ PAGE = r"""<!doctype html>
       .legend-panel{display:none}
     }
   </style>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-8MTMQYH9Z6"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-8MTMQYH9Z6');
+  </script>
 </head>
 <body>
   <div class="shell">
@@ -2057,6 +2067,23 @@ PAGE = r"""<!doctype html>
     </main>
   </div>
 
+  <section id="about-geopulse" style="max-width:820px;margin:0 auto;padding:48px 24px 64px;color:#101828;font:16px/1.7 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;">
+    <h2 style="font-size:24px;font-weight:700;margin:0 0 12px;">What GeoPulse measures</h2>
+    <p style="color:#475467;margin:0 0 16px;">GeoPulse builds a street network for whatever place you search, pulls it live from OpenStreetMap, and analyses what that network reaches. You choose a travel mode and a radius, and it returns the reachable area, the shape of the street grid, and the points of interest that fall inside it. Nothing is precomputed and no city list is baked in: the analysis runs against current OpenStreetMap data at the moment you ask for it.</p>
+    <p style="color:#475467;margin:0 0 24px;">Travel mode matters more than most people expect. A network that looks dense when driving often thins out sharply on foot, because footways, crossings, and pedestrian links are tagged separately from roads. Switching between drive, walk, and bike on the same location is usually the fastest way to see where a place has been built for cars and where it has not.</p>
+
+    <h2 style="font-size:24px;font-weight:700;margin:0 0 12px;">What the 15-minute city idea actually tests</h2>
+    <p style="color:#475467;margin:0 0 16px;">The 15-minute city is the proposition that daily needs — food, school, health care, work, and green space — should sit within a short walk or cycle of home. As an urban planning slogan it is contested. As a measurement it is useful, because it converts a vague question about neighbourhood quality into something you can check: within this radius, on foot, what is actually there.</p>
+    <p style="color:#475467;margin:0 0 24px;">A walkability figure is a summary, and summaries hide things. Two neighbourhoods can score alike while one is bounded by a motorway nobody can cross and the other is not. Severance, gradient, lighting, and whether the footway exists in usable condition are not in the data. Treat the score as a prompt to look closer rather than as a verdict.</p>
+
+    <h2 style="font-size:24px;font-weight:700;margin:0 0 12px;">Why OpenStreetMap, and what that costs</h2>
+    <p style="color:#475467;margin:0 0 24px;">OpenStreetMap is the only global street dataset that is openly licensed, editable, and current enough to answer a question about an arbitrary place. That openness is also the limitation: coverage is uneven and reflects who has mapped an area. Dense European and North American cities are richly tagged; many cities in lower-income countries are mapped well for roads and thinly for footways and amenities. A low score in an under-mapped area may describe the map rather than the place, which is the same distinction that governs every data system built on volunteered information.</p>
+
+    <h2 style="font-size:24px;font-weight:700;margin:0 0 12px;">Related work</h2>
+    <p style="color:#475467;margin:0 0 16px;">GeoPulse is one of the tools in a wider portfolio of AI and data systems: see the <a href="/build" style="color:#175cd3;">full list of builds</a> and the <a href="/ai-projects" style="color:#175cd3;">AI projects</a> written up in more depth. The reasoning behind building systems that hold up in places with unreliable infrastructure is set out in <a href="/framework" style="color:#175cd3;">the Last-Mile AI Framework</a>, and the same data-quality questions raised above run through <a href="/humanitarian-ai" style="color:#175cd3;">humanitarian AI</a>.</p>
+    <p style="color:#475467;margin:0;">Built by <a href="/" style="color:#175cd3;">Shahzad Asghar</a>. Map data from <a href="https://www.openstreetmap.org/copyright" rel="noopener noreferrer" style="color:#175cd3;">OpenStreetMap contributors</a>.</p>
+  </section>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet-image@0.4.0/leaflet-image.js"></script>
   <script>
@@ -2074,7 +2101,7 @@ PAGE = r"""<!doctype html>
 
     const map = L.map("map",{preferCanvas:true,zoomControl:true}).setView([37.7749,-122.4194],13);
     // CARTO basemaps now require an API key and return watermarked tiles without one,
-    // so the muted canvas comes from Esri instead. No key, free with attribution.
+    // so the default muted canvas comes from Esri instead. No key, free with attribution.
     const ESRI_ATTR = "&copy; Esri, &copy; OpenStreetMap contributors";
     // Esri Canvas has no tiles above z16; upscale them rather than show blank tiles.
     function esriCanvas(name,attribution){
@@ -2676,6 +2703,7 @@ PAGE = r"""<!doctype html>
 
     analyze();
   </script>
+<script src="/accessibility-widget.js?v=2" data-position="left" data-statement-url="/accessibility-statement" data-brand-text="Shahzad Asghar" defer></script>
 </body>
 </html>
 """
@@ -2687,6 +2715,9 @@ PAGE = r"""<!doctype html>
 URL_PREFIX = os.environ.get("GIS_URL_PREFIX", "").rstrip("/")
 
 app = Flask(__name__)
+# Serve /gis and /gis/ identically: Flask's default strict-slashes 308 to
+# /gis/ fights Vercel's trailingSlash:false (308 back to /gis) — a redirect loop.
+app.url_map.strict_slashes = False
 app.register_blueprint(gis, url_prefix=URL_PREFIX or None)
 # Honour X-Forwarded-* headers so url_for() works behind a reverse proxy.
 app.wsgi_app = ProxyFix(
