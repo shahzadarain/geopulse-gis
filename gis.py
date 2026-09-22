@@ -75,6 +75,10 @@ ASK_CACHE_TTL = int(os.environ.get("GIS_ASK_CACHE_TTL", "86400"))  # shared-cach
 
 # Optional Upstash Redis (REST) for cross-instance rate limiting + answer cache.
 # Accepts Upstash's own var names or Vercel KV's (which is Upstash-backed).
+# Optional CARTO basemap key. Without one CARTO returns watermarked tiles, so the
+# frontend only offers the CARTO layers when this is set.
+CARTO_API_KEY = os.environ.get("CARTO_API_KEY", "").strip()
+
 UPSTASH_URL = (os.environ.get("UPSTASH_REDIS_REST_URL")
                or os.environ.get("KV_REST_API_URL") or "").rstrip("/")
 UPSTASH_TOKEN = (os.environ.get("UPSTASH_REDIS_REST_TOKEN")
@@ -1307,6 +1311,7 @@ def index() -> Response:
         "centrality": url_for("gis.centrality"),
         "whatif": url_for("gis.whatif"),
         "ask": url_for("gis.ask"),
+        "carto_key": CARTO_API_KEY,
     }
     html = PAGE.replace("__GIS_CONFIG__", json.dumps(config))
     return Response(html, mimetype="text/html")
@@ -2068,13 +2073,49 @@ PAGE = r"""<!doctype html>
     const ROAD_LEGEND_COLOR = "#555555";
 
     const map = L.map("map",{preferCanvas:true,zoomControl:true}).setView([37.7749,-122.4194],13);
-    const light = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-      {maxZoom:20,crossOrigin:true,attribution:"&copy; OpenStreetMap contributors &copy; CARTO"}).addTo(map);
-    const dark = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-      {maxZoom:20,crossOrigin:true,attribution:"&copy; OpenStreetMap contributors &copy; CARTO"});
+    // CARTO basemaps now require an API key and return watermarked tiles without one,
+    // so the muted canvas comes from Esri instead. No key, free with attribution.
+    const ESRI_ATTR = "&copy; Esri, &copy; OpenStreetMap contributors";
+    // Esri Canvas has no tiles above z16; upscale them rather than show blank tiles.
+    function esriCanvas(name,attribution){
+      return L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"+name+"/MapServer/tile/{z}/{y}/{x}",
+        {maxZoom:20,maxNativeZoom:16,crossOrigin:true,attribution:attribution||""});
+    }
+    const esriLight = L.layerGroup([esriCanvas("World_Light_Gray_Base",ESRI_ATTR),
+      esriCanvas("World_Light_Gray_Reference")]);
+    const esriDark = L.layerGroup([esriCanvas("World_Dark_Gray_Base",ESRI_ATTR),
+      esriCanvas("World_Dark_Gray_Reference")]);
+
+    // CARTO still works, but only with a key. Set CARTO_API_KEY in the environment
+    // and the CARTO layers reappear as the default; without it they are hidden so
+    // nobody can select a watermarked basemap.
+    const CARTO_KEY = (CONFIG.carto_key||"").trim();
+    const CARTO_ATTR = "&copy; OpenStreetMap contributors &copy; CARTO";
+    function cartoBasemap(style){
+      const q = CARTO_KEY ? "?api_key="+encodeURIComponent(CARTO_KEY) : "";
+      return L.tileLayer("https://{s}.basemaps.cartocdn.com/"+style+"/{z}/{x}/{y}{r}.png"+q,
+        {maxZoom:20,crossOrigin:true,attribution:CARTO_ATTR});
+    }
+
     const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
       {maxZoom:19,crossOrigin:true,attribution:"&copy; OpenStreetMap contributors"});
-    L.control.layers({"Light":light,"Dark":dark,"OpenStreetMap":osm},{},{collapsed:true}).addTo(map);
+
+    const baseLayers = {};
+    let defaultBase;
+    if(CARTO_KEY){
+      baseLayers["Light"] = cartoBasemap("light_all");
+      baseLayers["Dark"] = cartoBasemap("dark_all");
+      baseLayers["Light (Esri)"] = esriLight;
+      baseLayers["Dark (Esri)"] = esriDark;
+      defaultBase = baseLayers["Light"];
+    }else{
+      baseLayers["Light"] = esriLight;
+      baseLayers["Dark"] = esriDark;
+      defaultBase = esriLight;
+    }
+    baseLayers["OpenStreetMap"] = osm;
+    defaultBase.addTo(map);
+    L.control.layers(baseLayers,{},{collapsed:true}).addTo(map);
 
     let streetLayer=null, haloLayer=null, lastData=null, walkZoneLayer=null;
     let poiLayers={};
