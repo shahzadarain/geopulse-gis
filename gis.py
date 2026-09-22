@@ -2100,21 +2100,18 @@ PAGE = r"""<!doctype html>
     const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
       {maxZoom:19,crossOrigin:true,attribution:"&copy; OpenStreetMap contributors"});
 
+    // CARTO's public basemap CDN watermarks tiles regardless of api_key, so Esri
+    // stays the default even when a key is set; CARTO is offered as an explicit
+    // choice only, ready for if CARTO changes that policy.
     const baseLayers = {};
-    let defaultBase;
+    baseLayers["Light"] = esriLight;
+    baseLayers["Dark"] = esriDark;
     if(CARTO_KEY){
-      baseLayers["Light"] = cartoBasemap("light_all");
-      baseLayers["Dark"] = cartoBasemap("dark_all");
-      baseLayers["Light (Esri)"] = esriLight;
-      baseLayers["Dark (Esri)"] = esriDark;
-      defaultBase = baseLayers["Light"];
-    }else{
-      baseLayers["Light"] = esriLight;
-      baseLayers["Dark"] = esriDark;
-      defaultBase = esriLight;
+      baseLayers["CARTO Light"] = cartoBasemap("light_all");
+      baseLayers["CARTO Dark"] = cartoBasemap("dark_all");
     }
     baseLayers["OpenStreetMap"] = osm;
-    defaultBase.addTo(map);
+    esriLight.addTo(map);
     L.control.layers(baseLayers,{},{collapsed:true}).addTo(map);
 
     let streetLayer=null, haloLayer=null, lastData=null, walkZoneLayer=null;
